@@ -1,0 +1,420 @@
+import 'dart:ui' show Offset;
+
+import 'package:tensorflow_demo/models/impact_event.dart';
+import 'package:tensorflow_demo/services/trajectory_extrapolator.dart';
+
+/// Phases of the impact detection state machine.
+enum DetectionPhase {
+  /// Waiting for ball to be detected moving toward target.
+  ready,
+
+  /// Ball is being tracked with sufficient velocity.
+  tracking,
+
+  /// Impact decision made, displaying result for [resultDisplayDuration].
+  result,
+}
+
+/// Multi-signal impact detector for target zone hit detection.
+///
+/// State machine: Ready -> Tracking -> Result -> Ready (after cooldown).
+///
+/// Uses three signals:
+/// 1. **Frame-edge exit filter**: Ball near frame edge -> MISS (flew past).
+/// 2. **Depth estimation filter** (Phase 5): Last bbox area vs reference ->
+///    ball must reach target depth for a valid HIT.
+/// 3. **Trajectory extrapolation**: Does the predicted path intersect the target?
+///
+/// Velocity magnitudes are accumulated but not gated on.
+///
+/// This is a plain Dart class -- no Flutter dependencies -- safe to unit-test.
+class ImpactDetector {
+  /// Minimum frames of tracking before a decision can be made.
+  /// At 30fps this is ~100ms of ball flight.
+  /// Research basis (ADR-047): Kalman filter velocity converges after 3-4
+  /// measurements (Bar-Shalom et al. 2001). Real soccer kicks complete
+  /// flight in 6-9 frames at 30fps; requiring 8 rejected 60% of valid kicks.
+  static const int minTrackingFrames = 3;
+
+  /// Minimum squared velocity magnitude (normalized units/frame)^2 to enter
+  /// tracking mode. 0.003^2 = 0.000009.
+  static const double minVelocityMagnitudeSq = 0.000009;
+
+  /// Frame edge threshold: position within this fraction of frame edge is
+  /// considered an edge exit (MISS). 8% of frame.
+  static const double edgeThreshold = 0.08;
+
+  /// Consecutive missed frames before making an impact decision.
+  /// At 30fps this is ~167ms of no ball detection.
+  static const int lostFrameThreshold = 5;
+
+  /// Minimum depth ratio (last bbox area / reference bbox area) for a valid
+  /// HIT. Below this, the ball never got close enough to the target.
+  static const double minDepthRatio = 0.7;
+
+  /// Maximum depth ratio for a valid HIT. Above this, the ball is still
+  /// mid-flight (closer to camera than the wall).
+  static const double maxDepthRatio = 1.3;
+
+  /// Maximum time in tracking phase before auto-reset to ready.
+  /// A kicked ball reaches the target in 0.5-1.5s; 3s is generous margin.
+  /// Prevents indefinite stuck-in-tracking states.
+  static const Duration maxTrackingDuration = Duration(seconds: 3);
+
+  /// Duration to display result before resetting to ready.
+  final Duration resultDisplayDuration;
+
+  ImpactDetector({
+    this.resultDisplayDuration = const Duration(seconds: 3),
+  });
+
+  // ---------------------------------------------------------------------------
+  // Internal state
+  // ---------------------------------------------------------------------------
+
+  DetectionPhase _phase = DetectionPhase.ready;
+  int _trackingFrameCount = 0;
+  DateTime? _trackingStartTime;
+  int _lostFrameCount = 0;
+  final List<double> _velocityHistory = [];
+  ExtrapolationResult? _bestExtrapolation;
+  Offset? _lastRawPosition;
+  ImpactEvent? _currentResult;
+  DateTime? _resultTimestamp;
+
+  /// Reference bounding box area captured during calibration. Null before
+  /// reference capture. Set via [setReferenceBboxArea].
+  double? _referenceBboxArea;
+
+  /// Most recent bbox area observed during the current tracking window.
+  /// In behind-kicker camera position, the ball shrinks as it approaches the
+  /// target, so the last-seen size (not peak) best represents target depth.
+  double _lastBboxArea = 0.0;
+
+  /// Zone number from direct position mapping, verified by depth ratio.
+  /// Only set when the ball's position maps to a zone AND depth ratio confirms
+  /// the ball is near the wall (not mid-flight passing through the grid region).
+  int? _lastDepthVerifiedZone;
+
+  /// Zone predicted by the WallPlanePredictor (perspective-corrected 3D
+  /// trajectory extrapolation to wall plane). Takes priority over
+  /// depth-verified direct mapping because it accounts for perspective
+  /// distortion of mid-flight ball positions.
+  int? _lastWallPredictedZone;
+
+  /// Peak squared velocity observed during the current tracking window.
+  /// Used to detect impact: velocity dropping to <40% of peak = wall hit.
+  double _peakVelocitySq = 0.0;
+
+  // ---------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------
+
+  /// Current phase of the state machine.
+  DetectionPhase get phase => _phase;
+
+  /// Current impact result, or null if not in result phase.
+  ImpactEvent? get currentResult => _currentResult;
+
+  /// Human-readable status text for the UI.
+  String get statusText {
+    switch (_phase) {
+      case DetectionPhase.ready:
+        return 'Ready \u2014 waiting for kick';
+      case DetectionPhase.tracking:
+        return 'Tracking...';
+      case DetectionPhase.result:
+        if (_currentResult == null) return '';
+        switch (_currentResult!.result) {
+          case ImpactResult.hit:
+            return 'Zone ${_currentResult!.zone}';
+          case ImpactResult.miss:
+            return 'MISS';
+          case ImpactResult.noResult:
+            return 'No result';
+        }
+    }
+  }
+
+  /// Process a single frame of detection data.
+  ///
+  /// [ballDetected] -- true if YOLO detected a ball this frame.
+  /// [velocity] -- Kalman-smoothed velocity (normalized units/frame), or null.
+  /// [extrapolation] -- current trajectory extrapolation result, or null.
+  /// [rawPosition] -- raw (coord-corrected) YOLO detection center, or null.
+  void processFrame({
+    required bool ballDetected,
+    Offset? velocity,
+    ExtrapolationResult? extrapolation,
+    Offset? rawPosition,
+    double? bboxArea,
+    int? directZone,
+    int? wallPredictedZone,
+  }) {
+    // Check cooldown expiration.
+    if (_phase == DetectionPhase.result) {
+      if (_resultTimestamp != null &&
+          DateTime.now().difference(_resultTimestamp!) >=
+              resultDisplayDuration) {
+        _reset();
+      }
+      return;
+    }
+
+    // Check tracking timeout — self-healing safety net.
+    if (_phase == DetectionPhase.tracking &&
+        _trackingStartTime != null &&
+        DateTime.now().difference(_trackingStartTime!) >= maxTrackingDuration) {
+      _reset();
+      return;
+    }
+
+    if (ballDetected) {
+      _onBallDetected(
+        velocity: velocity,
+        extrapolation: extrapolation,
+        rawPosition: rawPosition,
+        bboxArea: bboxArea,
+        directZone: directZone,
+        wallPredictedZone: wallPredictedZone,
+      );
+    } else {
+      _onBallMissing(extrapolation: extrapolation);
+    }
+  }
+
+  /// Force reset to ready state. Call when re-calibrating or leaving screen.
+  void forceReset() => _reset();
+
+  /// Sets the reference bounding box area from calibration.
+  void setReferenceBboxArea(double area) {
+    _referenceBboxArea = area;
+  }
+
+  /// Clears the reference bounding box area. Call on re-calibration.
+  void clearReferenceBboxArea() {
+    _referenceBboxArea = null;
+  }
+
+  /// Whether a reference bounding box area has been set.
+  bool get hasReferenceBboxArea => _referenceBboxArea != null;
+
+  // ---------------------------------------------------------------------------
+  // Private
+  // ---------------------------------------------------------------------------
+
+  void _onBallDetected({
+    Offset? velocity,
+    ExtrapolationResult? extrapolation,
+    Offset? rawPosition,
+    double? bboxArea,
+    int? directZone,
+    int? wallPredictedZone,
+  }) {
+    _lostFrameCount = 0;
+    if (rawPosition != null) _lastRawPosition = rawPosition;
+    if (bboxArea != null) {
+      _lastBboxArea = bboxArea;
+    }
+
+    // Wall-predicted zone: perspective-corrected 3D trajectory prediction.
+    // Takes priority because it accounts for the perspective distortion
+    // that causes mid-flight ball positions to map to wrong zones via
+    // the 2D homography.
+    if (wallPredictedZone != null) {
+      _lastWallPredictedZone = wallPredictedZone;
+    }
+
+    // Depth-verified direct zone: when the ball's position maps to a zone
+    // AND depth ratio confirms it's near the wall, store it. Kept as
+    // fallback behind wall-predicted zone.
+    if (directZone != null &&
+        _referenceBboxArea != null &&
+        _referenceBboxArea! > 0) {
+      final ratio = _lastBboxArea / _referenceBboxArea!;
+      if (ratio >= minDepthRatio && ratio <= maxDepthRatio) {
+        _lastDepthVerifiedZone = directZone;
+      }
+    }
+
+    if (velocity == null) return; // Kalman not initialized yet.
+
+    final velMagSq = velocity.dx * velocity.dx + velocity.dy * velocity.dy;
+    _velocityHistory.add(velMagSq);
+    if (_velocityHistory.length > 20) _velocityHistory.removeAt(0);
+
+    _bestExtrapolation = extrapolation;
+
+    switch (_phase) {
+      case DetectionPhase.ready:
+        if (velMagSq >= minVelocityMagnitudeSq) {
+          _phase = DetectionPhase.tracking;
+          _trackingFrameCount = 1;
+          _trackingStartTime = DateTime.now();
+        }
+      case DetectionPhase.tracking:
+        _trackingFrameCount++;
+        // Track peak velocity and detect impact via velocity drop.
+        if (velMagSq > _peakVelocitySq) _peakVelocitySq = velMagSq;
+        // Velocity dropped to <40% of peak while a zone prediction exists
+        // = ball hit the wall. Solves bounce-back (ball never lost) without
+        // premature triggering (mid-flight velocity stays near peak).
+        if ((_lastWallPredictedZone != null || _lastDepthVerifiedZone != null) &&
+            _peakVelocitySq > minVelocityMagnitudeSq &&
+            velMagSq < _peakVelocitySq * 0.4 &&
+            _trackingFrameCount >= minTrackingFrames) {
+          _makeDecision();
+          return;
+        }
+      case DetectionPhase.result:
+        break; // Unreachable (handled above).
+    }
+  }
+
+  void _onBallMissing({ExtrapolationResult? extrapolation}) {
+    if (_phase != DetectionPhase.tracking) return;
+
+    // ADR-047, Fix 3: During occlusion, retain the last valid extrapolation.
+    // Absence of detection is not new trajectory information. If a new
+    // Kalman-predicted extrapolation is available, use it (it may refine
+    // the prediction). Otherwise, keep whatever we had.
+    if (extrapolation != null) {
+      _bestExtrapolation = extrapolation;
+    }
+    // (If extrapolation is null, we intentionally keep _bestExtrapolation
+    // unchanged — unlike _onBallDetected which sets it unconditionally.)
+
+    _lostFrameCount++;
+    if (_lostFrameCount >= lostFrameThreshold) {
+      _makeDecision();
+    }
+  }
+
+  void _makeDecision() {
+    // DIAG: Log decision context.
+    print('┌─── IMPACT DECISION ───');
+    print('│ trackingFrames: $_trackingFrameCount (min: $minTrackingFrames)');
+    print('│ lastRawPosition: $_lastRawPosition');
+    print('│ lastBboxArea: ${_lastBboxArea.toStringAsFixed(6)}');
+    print('│ referenceBboxArea: ${_referenceBboxArea?.toStringAsFixed(6) ?? "null"}');
+    if (_referenceBboxArea != null && _referenceBboxArea! > 0) {
+      final ratio = _lastBboxArea / _referenceBboxArea!;
+      print('│ depthRatio: ${ratio.toStringAsFixed(4)} (allowed: $minDepthRatio - $maxDepthRatio)');
+    }
+    if (_lastRawPosition != null) {
+      final p = _lastRawPosition!;
+      print('│ edgeDistances: left=${p.dx.toStringAsFixed(3)} right=${(1.0 - p.dx).toStringAsFixed(3)} top=${p.dy.toStringAsFixed(3)} bottom=${(1.0 - p.dy).toStringAsFixed(3)} (threshold: $edgeThreshold)');
+    }
+    print('│ peakVelocitySq: ${_peakVelocitySq.toStringAsFixed(8)}');
+    print('│ bestExtrapolation: ${_bestExtrapolation != null ? "zone ${_bestExtrapolation!.zone} (target: ${_bestExtrapolation!.targetPoint}, camera: ${_bestExtrapolation!.cameraPoint}, framesAhead: ${_bestExtrapolation!.framesAhead})" : "null"}');
+    print('│ lastWallPredictedZone: $_lastWallPredictedZone');
+    print('│ lastDepthVerifiedZone: $_lastDepthVerifiedZone');
+
+    // Not enough tracking data -- reset without result.
+    if (_trackingFrameCount < minTrackingFrames) {
+      print('│ DECISION: reset (insufficient frames)');
+      print('└───────────────────────');
+      _reset();
+      return;
+    }
+
+    // Signal: Frame-edge exit filter.
+    // If the last known ball position is near any frame edge, the ball exited
+    // the camera view rather than hitting the target.
+    if (_lastRawPosition != null && _isNearEdge(_lastRawPosition!)) {
+      print('│ DECISION: MISS (edge exit)');
+      print('└───────────────────────');
+      _setResult(ImpactEvent(
+        result: ImpactResult.miss,
+        timestamp: DateTime.now(),
+      ));
+      return;
+    }
+
+    // Signal: Wall-predicted zone (highest priority).
+    // Uses perspective-corrected 3D trajectory extrapolation to predict
+    // where the ball will hit the wall plane. This is more accurate than
+    // depth-verified direct mapping because it accounts for the perspective
+    // distortion that causes mid-flight ball positions to map to the wrong
+    // zone via the 2D homography.
+    if (_lastWallPredictedZone != null) {
+      print('│ DECISION: HIT zone $_lastWallPredictedZone (wall-plane 3D prediction)');
+      print('└───────────────────────');
+      _setResult(ImpactEvent(
+        result: ImpactResult.hit,
+        zone: _lastWallPredictedZone!,
+        cameraPoint: _lastRawPosition,
+        timestamp: DateTime.now(),
+      ));
+      return;
+    }
+
+    // Signal: Depth-verified direct zone (fallback behind wall prediction).
+    // If the ball was detected inside the target grid AND depth ratio
+    // confirmed it was near the wall (not mid-flight), use that zone.
+    if (_lastDepthVerifiedZone != null) {
+      print('│ DECISION: HIT zone $_lastDepthVerifiedZone (depth-verified direct mapping)');
+      print('└───────────────────────');
+      _setResult(ImpactEvent(
+        result: ImpactResult.hit,
+        zone: _lastDepthVerifiedZone!,
+        cameraPoint: _lastRawPosition,
+        timestamp: DateTime.now(),
+      ));
+      return;
+    }
+
+    // Signal: Trajectory extrapolation (fallback).
+    // If no depth-verified zone was captured, fall back to the predicted
+    // trajectory intersection with the target area.
+    if (_bestExtrapolation != null) {
+      print('│ DECISION: HIT zone ${_bestExtrapolation!.zone} (extrapolation fallback)');
+      print('└───────────────────────');
+      _setResult(ImpactEvent(
+        result: ImpactResult.hit,
+        zone: _bestExtrapolation!.zone,
+        cameraPoint: _bestExtrapolation!.cameraPoint,
+        targetPoint: _bestExtrapolation!.targetPoint,
+        timestamp: DateTime.now(),
+      ));
+      return;
+    }
+
+    // No signals triggered -- inconclusive.
+    print('│ DECISION: noResult (no extrapolation available)');
+    print('└───────────────────────');
+    _setResult(ImpactEvent(
+      result: ImpactResult.noResult,
+      timestamp: DateTime.now(),
+    ));
+  }
+
+  bool _isNearEdge(Offset pos) {
+    return pos.dx < edgeThreshold ||
+        pos.dx > (1.0 - edgeThreshold) ||
+        pos.dy < edgeThreshold ||
+        pos.dy > (1.0 - edgeThreshold);
+  }
+
+  void _setResult(ImpactEvent event) {
+    _phase = DetectionPhase.result;
+    _currentResult = event;
+    _resultTimestamp = DateTime.now();
+  }
+
+  void _reset() {
+    _phase = DetectionPhase.ready;
+    _trackingFrameCount = 0;
+    _trackingStartTime = null;
+    _lostFrameCount = 0;
+    _velocityHistory.clear();
+    _bestExtrapolation = null;
+    _lastRawPosition = null;
+    _currentResult = null;
+    _resultTimestamp = null;
+    _lastBboxArea = 0.0;
+    _lastDepthVerifiedZone = null;
+    _lastWallPredictedZone = null;
+    _peakVelocitySq = 0.0;
+  }
+}
