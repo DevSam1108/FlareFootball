@@ -4,6 +4,34 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 ---
 
+## ISSUE-028: 2-Layer False Positive Filter Broke Ball Re-acquisition (REVERTED)
+
+**Date:** 2026-04-13
+**Platform:** iOS (iPhone 12)
+**Symptom:** After implementing DetectionFilter (pre-ByteTrack AR + size reject) + TrackQualityGate (post-ByteTrack init delay + rolling median) + Mahalanobis rescue validation, ball tracking became severely unstable. Track IDs cycled from 1 to 15 in one session. BallIdentifier locked onto a poster on the wall (id:6, ar:0.8, c:0.99) and player's head (id:14, ar:0.9, c:0.98). Real ball detections were stuck at [INIT 2] and never reached BallIdentifier.
+
+**Root Cause:** TrackQualityGate's initialization delay (4 frames) blocked new tracks from reaching BallIdentifier. When the original ball lock was lost (player walked in front), the real ball reappeared as a new ByteTrack track but was held at [INIT] for 4 frames. During that window, BallIdentifier re-acquired to whatever was already available — poster, head, etc. Additionally, DetectionFilter may have intermittently rejected the real ball on borderline frames, causing ByteTrack to lose and recreate tracks (explaining the id churn).
+
+**Evidence:** 6 screenshots from device testing:
+1. Ball correctly locked (id:1) — baseline good
+2. Real ball (id:2) stuck at [INIT 2], locked track (id:1) drifted to ar:0.3
+3. Ball lock lost entirely, player head (id:3) passed all filters
+4. Poster locked as ball (id:6, ar:0.8, c:0.99) — total identity corruption
+5. id:11 with AR 3.8 passed Layer 1 (should have been rejected at AR > 2.5 threshold)
+6. Player head (id:14, ar:0.9, c:0.98) passed all filters as yellow candidate
+
+**Fix:** Fully reverted all changes. 4 modified files restored via `git checkout`, 4 new files deleted. 176/176 tests passing.
+
+**Lessons:**
+1. **Never block tracks from BallIdentifier** — init delay starves re-acquisition. Any post-ByteTrack filter must pass ALL tracks through; can tag/score but must not remove from candidate pool.
+2. **Player head (ar:0.9) is unfilterable with geometry** — needs second-stage classifier or motion channel.
+3. **Implement ONE filter at a time** — test on device before adding the next. Multi-layer simultaneous changes make it impossible to isolate which filter caused which problem.
+4. **Mahalanobis rescue validation (size + velocity) is the safest first step** — it only restricts rescue matching inside ByteTrack, doesn't touch pipeline flow or BallIdentifier at all.
+
+**Status:** ✅ REVERTED (2026-04-13). Codebase clean. 176/176 tests passing.
+
+---
+
 ## ISSUE-027: isStatic Flag Never Clears on Existing ByteTrack Tracks
 
 **Date:** 2026-04-09

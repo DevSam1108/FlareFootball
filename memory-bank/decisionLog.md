@@ -1087,6 +1087,20 @@
 - **Trade-offs Accepted:** `ListQueue` per `_STrack` (~30 doubles = ~240 bytes per track). Negligible memory impact. Window size determines response latency — 30 frames means ~1 second delay before classification changes.
 - **Status:** Accepted. Device-verified on iPhone 12.
 
+### ADR-068: Pre-ByteTrack AR Upper Bound Filter (AR > 1.8 Only)
+
+- **Date:** 2026-04-13
+- **Context:** YOLO false positives on kicker torso/limbs (AR 2.4-3.6, confidence 0.95+) were entering ByteTrack, creating ephemeral tracks that burned through track IDs (observed trackId=55 in one session). Each unmatched false positive detection creates a new `_STrack` with `_nextId++`. Need to filter these before ByteTrack without breaking real ball detection.
+- **Options Considered:**
+  1. **Upper + lower AR bounds (>1.8 and <0.55)** — catches both wide (torso) and tall (unknown) false positives. Risk: lower bound may intermittently reject real ball on frames where YOLO bbox is vertically elongated.
+  2. **Upper bound only (>1.8)** — catches torso/limb false positives. No risk to real ball (observed max AR ~1.5). No tall-narrow false positives have been observed.
+  3. **Higher threshold (>2.5)** — more conservative, only catches extreme torsos. Misses borderline cases.
+  4. **NMS dedup in `_toDetections()`** — suppress overlapping detections from different classes (Soccer ball + ball on same object). Fixes dual-detection churn but not torso false positives.
+- **Decision:** Option 2 — upper bound only (AR > 1.8)
+- **Rationale:** Real ball AR observed max ~1.5; threshold at 1.8 gives margin. No false positives have been observed with tall-narrow bboxes, so lower bound adds risk without benefit. Lower bound was initially implemented and removed after device testing suggested it may have been intermittently rejecting real ball detections (isStatic stopped triggering, possibly due to detection gaps breaking the 30-frame sliding window). Simplest possible filter — 2 lines of code, no new classes, no pipeline changes.
+- **Trade-offs Accepted:** Player head (AR 0.9) passes this filter — geometrically identical to ball. Needs separate solution (second-stage classifier or motion channel). Torso bboxes at AR 1.8-2.4 (if they exist) would also pass.
+- **Status:** Accepted. Monitor-tested, pending field test.
+
 ---
 
 *Decision log created: 2026-03-13*

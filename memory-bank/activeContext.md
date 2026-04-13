@@ -3,11 +3,26 @@
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
 ## Current Focus
-**ISSUE-027 (isStatic) fixed and device-verified (2026-04-13).** The `isStatic` flag in ByteTrack's `_STrack` was a one-way permanent flag — once set to `true`, it never cleared even when the ball was kicked. This caused BallIdentifier to reject the real ball track during re-acquisition. Fixed by replacing the lifetime cumulative displacement accumulator with a sliding window (`ListQueue<double>`, last 30 frames). The flag now transitions both directions automatically. Research into ByteTrack/SORT/DeepSORT/OC-SORT/Norfair confirmed none have static classification; the approach was inspired by Frigate NVR's production implementation (IOU-based position stability over frame windows with counter reset on motion).
+**Pre-ByteTrack AR filter implemented and device-tested (2026-04-13).** A simple upper-bound aspect ratio filter (`ar > 1.8`) rejects elongated YOLO false positives (torso/limb bboxes, AR 2.4-3.6) before they enter ByteTrack. Device-tested on monitor — reduced false positive trail dots on player body. Clean visual output with debug overlay disabled. 176/176 tests passing.
 
-Remaining critical bugs from previous session:
-1. **Mahalanobis rescue hijacks ball identity (ISSUE-026)** — locked track jumps from real ball to false positives via Mahalanobis matching. Causes total tracking loss.
-2. **YOLO false positives on kicker body at high confidence** — head (ar:0.9-1.0, c:0.95+), torso (ar:2.4-3.6, c:0.99+). Needs bbox shape/size filtering.
+### What Was Done This Session (2026-04-13)
+1. **Attempted Mahalanobis rescue validation** — size ratio + velocity direction checks inside `_greedyMatch()` in `bytetrack_tracker.dart`. Reverted at developer request to maintain one-change-at-a-time discipline. The Mahalanobis rescue remains unguarded (ISSUE-026 still open).
+2. **Added pre-ByteTrack AR filter** — 2 lines in `_toDetections()` in `live_object_detection_screen.dart`. Initially had both upper (>1.8) and lower (<0.55) bounds; lower bound removed after discussion since no false positives have tall-narrow bboxes and the lower bound may have been intermittently rejecting real ball detections.
+3. **Debug bbox overlay disabled** — `_debugBboxOverlay = false` (set manually by developer). Overlay revealed that track ID churn and dual detections on same ball were always happening but don't affect functional behavior — BallIdentifier only follows the locked (green) track.
+
+### Failed Approach (2026-04-13, earlier session) — DO NOT REPEAT
+Implemented a 2-layer filter: (1) DetectionFilter pre-ByteTrack (AR + size hard reject), (2) TrackQualityGate post-ByteTrack (init delay + rolling median), (3) Mahalanobis rescue validation (size ratio + velocity direction). Device testing showed:
+- **Init delay (4 frames) blocked BallIdentifier re-acquisition** — real ball stuck at [INIT] while BallIdentifier locked onto poster/head
+- **Track ID churn** (id:1 → id:15 in one session) — filters intermittently rejected real ball, destabilizing ByteTrack
+- **Player head (ar:0.9, c:0.98) passes ALL geometric filters** — fundamentally unfilterable with AR + size
+- **Poster locked as ball** (ar:0.8, c:0.99) — passed all filters, static flag hadn't triggered yet (needs 30 frames)
+
+**Key lesson:** Any filter between ByteTrack and BallIdentifier that delays or blocks tracks risks breaking re-acquisition. The re-acquisition path is the most fragile part of the pipeline. Filters must NOT starve BallIdentifier of candidates.
+
+### What Remains
+1. **Mahalanobis rescue hijacks ball identity (ISSUE-026)** — locked track jumps from real ball to false positives via Mahalanobis matching. Causes total tracking loss. Mahalanobis rescue validation (size ratio + velocity direction) was implemented and reverted this session — can be re-applied after AR filter is field-tested.
+2. **Player head false positives (ar:0.9, c:0.98)** — passes AR filter (within ball range). Unfilterable with geometry alone. Needs second-stage classifier or motion channel.
+3. **Track ID churn** — YOLO dual-class detections on same ball (Soccer ball + ball) create duplicate tracks. Cosmetic — doesn't affect BallIdentifier which follows locked track only. NMS dedup in `_toDetections()` would fix but is not a priority.
 
 ### Monitor Test Results — Session 2 (2026-04-09, with calibration diagnostics + debug overlay)
 
@@ -83,7 +98,8 @@ Android test device changed from **Galaxy A32 (SM-A325F)** to **Realme 9 Pro+ (S
 - **YOLO live camera detection (iOS)** — `YOLOView` renders correctly on iPhone 12 with ball trail, "Ball lost" badge, and all overlays
 - **YOLO live camera detection (Android)** — `YOLOView` renders on Realme 9 Pro+ with `onResult` confirmed firing. Trail dots, connecting lines, and "Ball lost" badge all visually confirmed working.
 - **Ball tracking throughout flight** — YOLO + ByteTrack tracks the ball during flight. Track identity subject to corruption (ISSUE-026).
-- **Debug bounding box overlay (2026-04-09)** — Visual debug overlay showing all ball-class detections with colored bboxes (green=locked, yellow=candidate, red=lost), trackId, bbox WxH, aspect ratio, confidence, isStatic. Toggle: `_debugBboxOverlay` const.
+- **Pre-ByteTrack AR filter (2026-04-13)** — Rejects YOLO detections with aspect ratio > 1.8 in `_toDetections()` before they enter ByteTrack. Eliminates torso/limb false positives (AR 2.4-3.6). Device-tested on monitor — reduced false positive trail dots.
+- **Debug bounding box overlay (2026-04-09)** — Visual debug overlay showing all ball-class detections with colored bboxes (green=locked, yellow=candidate, red=lost), trackId, bbox WxH, aspect ratio, confidence, isStatic. Toggle: `_debugBboxOverlay` const. **Currently disabled** (`false`).
 - **Calibration geometry diagnostics (2026-04-09)** — Logs 15+ geometric parameters at every calibration and pipeline start for cross-session comparison.
 - **Enhanced BallIdentifier logging (2026-04-09)** — Re-acquisition events log old→new trackId, bbox shape, reason. Lost events show all candidates with full info.
 - **Backend switching infrastructure** — `DETECTOR_BACKEND` env var system preserved; currently only `yolo` is implemented
@@ -117,14 +133,16 @@ Android test device changed from **Galaxy A32 (SM-A325F)** to **Realme 9 Pro+ (S
 - **Evaluation documentation** — `docs/` and `result/android/` contain evidence from both platforms.
 
 ## What Is Partially Done / In Progress
+- **Pre-ByteTrack AR filter — IMPLEMENTED, NEEDS FIELD TEST** — Rejects AR > 1.8 in `_toDetections()`. Monitor-tested, reduced false positive dots on player. Needs real field test to confirm.
 - **directZone decision logic — PROVEN UNRELIABLE** — Reports first zone entered (always zone 1 for upward kicks), not impact zone. 0/5 to 3/4 correct depending on calibration. Needs fundamental rethink.
-- **Mahalanobis rescue identity hijacking (ISSUE-026, CRITICAL)** — Locked track jumps to false positives. Causes total tracking loss. Fix: bbox size/aspect ratio validation on rescue.
+- **Mahalanobis rescue identity hijacking (ISSUE-026, CRITICAL)** — Locked track jumps to false positives. Causes total tracking loss. Fix code was written/tested/reverted this session — ready to re-apply after AR filter field test.
 - **~~isStatic flag never clears (ISSUE-027)~~** — ✅ FIXED (2026-04-13). Sliding window displacement replaces lifetime accumulator. Device-verified.
 - **`tennis-ball` accepted at priority 2** — Diagnostic concession from Phase 9; unnecessary but harmless.
 - **Ball identifier re-acquisition** — Picks up player walking, target circles on bounce-back. Needs conservative re-acquisition during idle state.
-- **False trail dots on non-ball objects** — Orange trail dots appear on player body, poster, and other non-ball objects when BallIdentifier re-acquires to wrong track. Root cause is BallIdentifier track identity, not trail timing.
+- **False trail dots on non-ball objects — PARTIALLY MITIGATED** — AR filter reduces torso false positives. Player head (ar:0.9) still passes. Root cause is BallIdentifier track identity, not trail timing.
 - **Phantom impact decisions during idle (log pollution)** — ImpactDetector fires decisions during kick=idle. NOT announced (KickDetector result gate blocks). Diagnostic log noise only.
 - **Extrapolation overshoot in trail dots** — Video test showed trail dots extending past the grid (zone 8 and beyond) on kicks aimed at zone 5 or 7. The Kalman prediction keeps projecting linearly after the real ball stops. Trail dots are drawn from Kalman predictions, not just real detections.
+- **Track ID churn (cosmetic)** — YOLO fires two detections per ball (Soccer ball + ball classes), each creating a separate ByteTrack track. Does NOT affect functionality — BallIdentifier follows locked track only. NMS dedup would fix if desired.
 
 ## Known Critical Issue: Target Circle False Positives (ISSUE-022)
 **Status: CONFIRMED — physical fix required. Remove circles from target fabric.**
@@ -287,8 +305,19 @@ flutter run --dart-define=DETECTOR_BACKEND=yolo
 flutter run
 ```
 
-## Immediate Next Steps
-1. **Fix Mahalanobis rescue identity hijacking (ISSUE-026)** — Add bbox size/aspect ratio validation before Mahalanobis rescue matches a detection to the locked track. Reject if bboxArea > 3x reference or aspect ratio > 1.5.
-2. **Add YOLO false positive bbox filter** — Reject ball-class detections where bboxArea > 3x reference or aspect ratio > 1.5. Eliminates torso/jacket false positives (ar:2.4-3.6).
-3. **Rethink zone determination approach** — directZone unreliable for upward kicks. Options: (a) trajectory extrapolation to wall, (b) WallPlanePredictor as primary (4/4 correct on Test 1), (c) hybrid, (d) delay decision until depthRatio ~1.0.
-4. **Test with debug overlay on real field** — Verify if isStatic fix + remaining identity corruption patterns hold with real kicks.
+## Immediate Next Steps — INCREMENTAL, ONE AT A TIME
+**Rule: Implement ONE filter, device-test, confirm no regression, then move to next.**
+
+1. **Field test AR filter (2026-04-13)** — AR > 1.8 filter is in place and monitor-tested. Needs field test at real distance with actual kicker to confirm torso false positives are caught and real ball is never rejected.
+
+2. **Mahalanobis rescue validation (ISSUE-026)** — After AR filter is field-validated, re-apply size ratio + velocity direction checks inside `_greedyMatch()`. Code was written and tested this session (176/176 pass) but reverted to maintain one-change-at-a-time. Can be re-applied quickly.
+
+3. **Rethink zone determination** — directZone unreliable for upward kicks. Options: (a) WallPlanePredictor as primary (4/4 correct on Test 1), (b) delay decision until depthRatio ~1.0, (c) trajectory extrapolation.
+
+4. **Guided Setup Flow** — #1 feature after tracking is stable. Voice-guided camera positioning with auto-lock (7-step flow).
+
+### Approaches Validated by Research (for reference)
+- **Proven in production:** AR filter, size filter, min track age, velocity consistency (Frigate NVR, Hawk-Eye, Norfair, OC-SORT, Roboflow)
+- **What DOESN'T work for us:** Post-ByteTrack init delay that blocks BallIdentifier re-acquisition. Any filter between ByteTrack output and BallIdentifier input must pass ALL tracks through — it can tag/score them but must not remove them from BallIdentifier's candidate pool.
+- **Player head (ar:0.9, c:0.98) is unfilterable with geometry alone** — needs either a second-stage crop classifier (MobileNetV2, ~5ms on iPhone 12) or motion channel validation (frame differencing, not available from ultralytics_yolo plugin).
+- **Track ID churn is cosmetic** — YOLO dual-class detections create duplicate tracks but BallIdentifier only follows the locked track. High track IDs (e.g., id:55) don't affect functionality.

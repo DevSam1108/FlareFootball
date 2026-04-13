@@ -226,7 +226,7 @@ The following require explicit discussion before changes are made:
 | `tennis-ball` priority 2 in class filter | Minor | Diagnostic concession from Phase 9. `Soccer ball` detects correctly; `tennis-ball` filter is unnecessary but harmless. |
 | Free Apple Dev cert expires every 7 days | Known | Re-run `flutter run` to re-sign. If "Unable to Verify" appears, delete app and reinstall. See `memory-bank/issueLog.md` ISSUE-002. |
 | Off-by-one: `maxActiveMissedFrames=5` == `lostFrameThreshold=5` | Bug 2 — less critical | KickDetector closes gate on same frame ImpactDetector would trigger from ball loss. Less impactful now that result gate accepts `confirming` state. |
-| False positive YOLO detections on non-ball objects (kicker body) | FIXED (2026-04-01) | Phase-aware `_applyPhaseFilter()` in `_pickBestBallYolo`. |
+| False positive YOLO detections on non-ball objects (kicker body) | **🟡 PARTIALLY FIXED** | **Phase-aware `_applyPhaseFilter()` (2026-04-01) + pre-ByteTrack AR > 1.8 filter (2026-04-13, ADR-068). Torso (AR 2.4-3.6) eliminated. Player head (AR 0.9) still passes — geometrically identical to ball.** |
 | Bounce-back false detection | Identified 2026-04-01 | YOLO detects ball on rebound, triggers second decision. Confirmed in Phase 1 (2026-04-06) — bounce-back produced false HIT zone 1 after real HIT zone 6. WallPlanePredictor stale data not fully cleared. |
 | Ball identifier false re-acquisition | Identified 2026-04-06 | Re-acquires on player walking (motion-based) and target circles (bounce-back). Should not re-acquire during idle state. |
 | Kick-state gate on ImpactDetector — REVERTED | REVERTED (2026-04-08) | Attempted gating ImpactDetector/WallPredictor behind KickDetector. Broke grounded kicks (3/5 undetected). KickDetector's jerk threshold too aggressive for low-velocity shots. See ISSUE-025, ADR-061. |
@@ -235,6 +235,7 @@ The following require explicit discussion before changes are made:
 | **Mahalanobis rescue identity hijacking (ISSUE-026)** | **🔴 CRITICAL** | **Locked track jumps to false positives via Mahalanobis distance. Causes total tracking loss. Debug overlay confirmed visually. Fix: add bbox size/aspect ratio validation on rescue.** |
 | **~~isStatic flag never clears (ISSUE-027)~~** | **✅ FIXED (2026-04-13)** | **Replaced lifetime cumulative displacement with sliding window (last 30 frames). `isStatic` now two-way. Device-verified.** |
 | **directZone unreliable for non-bottom zones** | **🟡 DESIGN** | **directZone reports first zone entered (zone 1 for upward kicks), not impact zone. Calibration-sensitive. 0/5 to 3/4 correct depending on calibration. Needs rethink.** |
+| **2-layer false positive filter (ISSUE-028)** | **❌ REVERTED (2026-04-13)** | **DetectionFilter + TrackQualityGate + Mahalanobis rescue validation. Init delay broke BallIdentifier re-acquisition. Player head (ar:0.9) unfilterable with geometry. Must implement ONE filter at a time. Start with Mahalanobis rescue validation only.** |
 
 > **Full issue history:** See `memory-bank/issueLog.md` for all issues with root causes and verified solutions.
 

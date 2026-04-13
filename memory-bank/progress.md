@@ -448,15 +448,23 @@
 | **Accept `confirming` in result gate (ADR-064)** | **Fast kicks don't produce 3 sustained high-speed frames needed for `active`. `confirming` (jerk spike detected) + directZone (ball in grid) is a sufficient double-gate for real kicks.** |
 | **Replace fragmented pipeline with ByteTrack (ADR-058)** | **Field testing (2026-04-04) revealed ISSUE-022 (target circle false positives) and deeper architectural flaw: no object identity, centroid-only tracking, fragmented band-aid services. Decision: complete ByteTrack in pure Dart with 8-state Kalman (cx,cy,w,h,vx,vy,vw,vh), two-pass IoU matching, BallIdentifier for automatic ball re-acquisition. Evaluated 6 options: band-aid filters, model retraining, centroid-only IoU tracker (fails for fast balls), ByteTrack (chosen), ML Kit plugin switch, plugin fork. ByteTrack replaces BallTracker, KalmanFilter, WallPlanePredictor, TrajectoryExtrapolator, _pickBestBallYolo, _applyPhaseFilter. ~800-1000 lines removed, ~450-500 added.** |
 | **Full bounding box as primary tracking data (ADR-059)** | **Existing pipeline extracted only bbox center (2 values), discarding width/height. This limited Kalman to 4-state (no size prediction), made IoU matching impossible, and required separate depth estimation. New approach: 8-state Kalman tracks full bbox + rates of change. Enables IoU matching for fast balls (predicted bbox accounts for motion + size change), built-in depth tracking, and richer object discrimination.** |
+| **Pre-ByteTrack AR > 1.8 upper bound only (ADR-068)** | **Rejects elongated YOLO false positives (torso AR 2.4-3.6) before ByteTrack. Upper bound only — no lower bound (no tall-narrow false positives observed, lower bound risked rejecting real ball). Real ball AR max ~1.5; threshold 1.8 gives margin. 2 lines, no pipeline changes. Player head (AR 0.9) still passes — needs different approach.** |
 
 ### ⚙️ Mahalanobis Rescue Identity Hijacking (ISSUE-026)
-- **Status:** Identified. CRITICAL priority.
+- **Status:** Identified. CRITICAL priority. Fix code written, tested (176/176), and reverted (2026-04-13) — keeping one-change-at-a-time discipline. Ready to re-apply after AR filter field test.
 - **Blocker:** Locked track jumps to false positives (video player, wall marks, kicker body) via Mahalanobis distance matching. Causes total tracking loss.
-- **Resolution:** Add bbox size/aspect ratio validation on Mahalanobis rescue. Reject if bboxArea > 3x reference or aspect ratio > 1.5.
+- **Resolution:** Add size ratio check (reject >3x or <0.33x area) and velocity direction check (dot product, reject if detection behind ball motion) in `_greedyMatch()` Mahalanobis rescue loop.
 
 ### ✅ isStatic Flag Never Clears (ISSUE-027) — FIXED (2026-04-13)
 - **Status:** Fixed and device-verified.
 - **Fix:** Replaced lifetime `_cumulativeDisplacement` accumulator in `_STrack` with sliding window `ListQueue<double>` (last 30 frames). `evaluateStatic()` now sums only the window, making `isStatic` fully two-way. Approach inspired by Frigate NVR production implementation. Research confirmed no standard tracker (ByteTrack/SORT/DeepSORT/OC-SORT/Norfair) has static classification — this is a custom addition. 3 new tests added (static→dynamic, dynamic→static, full cycle).
+
+### ❌ 2-Layer False Positive Filter — ATTEMPTED AND REVERTED (ISSUE-028, 2026-04-13)
+- **Status:** Fully reverted. Codebase clean. 176/176 tests.
+- **What was tried:** DetectionFilter (pre-ByteTrack AR > 2.5 + size > 5x reject) + TrackQualityGate (post-ByteTrack init delay 4 frames + rolling median AR/size/confidence) + Mahalanobis rescue validation (size ratio + velocity direction).
+- **Why it failed:** Init delay blocked BallIdentifier re-acquisition. Real ball stuck at [INIT] while BallIdentifier grabbed poster/head. Track ID churn (1→15). Player head (ar:0.9) unfilterable with geometry.
+- **Key lesson:** Never block tracks from BallIdentifier. Post-ByteTrack filters must pass ALL tracks through — can tag/score but must not remove from candidate pool. Implement ONE filter at a time, device-test each.
+- **Next approach:** Pre-ByteTrack AR > 1.8 filter implemented (2026-04-13, ADR-068). Monitor-tested, pending field test. Then Mahalanobis rescue validation (code ready to re-apply). One at a time.
 
 ### ⚠️ directZone Unreliable for Non-Bottom Zones
 - **Status:** Identified. Needs design decision.

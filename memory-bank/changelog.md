@@ -2,6 +2,23 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## Pre-ByteTrack AR Filter for False Positive Reduction (2026-04-13)
+
+### Summary
+Added a pre-ByteTrack aspect ratio filter to reject elongated YOLO false positives (torso/limb bboxes) before they enter the tracker. Detections with AR > 1.8 are rejected in `_toDetections()`. Also attempted and reverted Mahalanobis rescue validation (size ratio + velocity direction checks) — keeping one-change-at-a-time discipline. Debug bbox overlay disabled by developer for cleaner visual output.
+
+### Modified Files
+- **`lib/screens/live_object_detection/live_object_detection_screen.dart`** — Added AR > 1.8 reject in `_toDetections()` (2 lines). Debug overlay `_debugBboxOverlay` set to `false` by developer.
+- **`lib/services/bytetrack_tracker.dart`** — Mahalanobis rescue validation added then reverted (net: no change from session start).
+
+### Verification
+```
+$ flutter analyze -- 0 errors, 0 warnings, 81 infos
+$ flutter test -- 176/176 passing
+```
+
+---
+
 ## ISSUE-027 Fix: Two-Way isStatic Classification via Sliding Window (2026-04-13)
 
 ### Summary
