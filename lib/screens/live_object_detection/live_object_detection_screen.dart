@@ -64,7 +64,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   // ---------------------------------------------------------------------------
   // Debug: bbox overlay toggle. Set to false to disable completely.
   // ---------------------------------------------------------------------------
-  static const _debugBboxOverlay = true;
+  static const _debugBboxOverlay = false;
 
   /// All ball-class tracks from the latest ByteTrack frame (for debug overlay).
   List<TrackedObject> _debugBallClassTracks = const [];
@@ -195,7 +195,15 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     for (final r in results) {
       if (!_ballClassNames.contains(r.className)) continue;
 
-      var bbox = r.normalizedBox;
+      // Reject elongated bboxes (torso/limb false positives).
+      // Real ball AR observed max ~1.5; threshold at 1.8 gives margin.
+      final rawBbox = r.normalizedBox;
+      if (rawBbox.height > 0) {
+        final ar = rawBbox.width / rawBbox.height;
+        if (ar > 1.8) continue;
+      }
+
+      var bbox = rawBbox;
       // Android coordinate correction: flip entire bbox for rotation=3.
       if (Platform.isAndroid && _androidDisplayRotation == 3) {
         bbox = Rect.fromLTRB(
