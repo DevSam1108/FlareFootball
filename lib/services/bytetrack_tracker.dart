@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:math';
 import 'dart:ui' show Offset, Rect;
 
@@ -433,22 +434,25 @@ class _STrack {
   double confidence;
   int totalFramesSeen;
   int consecutiveLostFrames;
-  double _cumulativeDisplacement;
+  final ListQueue<double> _recentDisplacements;
   Offset _prevCenter;
   bool isStatic;
 
-  _STrack(Detection det)
+  _STrack(Detection det, {int displacementWindow = 30})
       : id = _nextId++,
         state = TrackState.tracked,
         className = det.className,
         confidence = det.confidence,
         totalFramesSeen = 1,
         consecutiveLostFrames = 0,
-        _cumulativeDisplacement = 0.0,
+        _recentDisplacements = ListQueue<double>(),
+        _displacementWindowSize = displacementWindow,
         _prevCenter = det.bbox.center,
         isStatic = false {
     kalman.initFromDetection(det.bbox);
   }
+
+  final int _displacementWindowSize;
 
   void predict() => kalman.predict();
 
@@ -460,11 +464,14 @@ class _STrack {
     consecutiveLostFrames = 0;
     totalFramesSeen++;
 
-    // Accumulate displacement for static detection
+    // Track recent displacement for static detection (sliding window)
     final c = kalman.center;
     final dx = c.dx - _prevCenter.dx;
     final dy = c.dy - _prevCenter.dy;
-    _cumulativeDisplacement += sqrt(dx * dx + dy * dy);
+    _recentDisplacements.addLast(sqrt(dx * dx + dy * dy));
+    if (_recentDisplacements.length > _displacementWindowSize) {
+      _recentDisplacements.removeFirst();
+    }
     _prevCenter = c;
   }
 
@@ -473,14 +480,14 @@ class _STrack {
     consecutiveLostFrames++;
   }
 
-  /// Check and set static flag based on accumulated evidence.
-  /// A track seen for [minFrames] with total displacement under [maxDisp]
-  /// is permanently flagged as static.
+  /// Two-way static classification based on sliding window displacement.
+  /// Evaluates displacement over the most recent [minFrames] frames.
+  /// Static when window is full and total recent displacement < [maxDisp].
+  /// Clears automatically when displacement exceeds threshold.
   void evaluateStatic({int minFrames = 30, double maxDisp = 0.02}) {
-    if (!isStatic && totalFramesSeen >= minFrames &&
-        _cumulativeDisplacement < maxDisp) {
-      isStatic = true;
-    }
+    if (_recentDisplacements.length < minFrames) return;
+    final recentTotal = _recentDisplacements.fold(0.0, (a, b) => a + b);
+    isStatic = recentTotal < maxDisp;
   }
 
   Rect get predictedBbox => kalman.predictedBbox;

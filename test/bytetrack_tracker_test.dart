@@ -222,7 +222,7 @@ void main() {
       expect(tracker.tracks.first.isStatic, isFalse);
     });
 
-    test('static flag is permanent once set', () {
+    test('static flag stays true with minor jitter', () {
       final tracker = ByteTrackTracker(staticMinFrames: 10, staticMaxDisplacement: 0.01);
       // Static for 15 frames
       for (var i = 0; i < 15; i++) {
@@ -232,11 +232,64 @@ void main() {
       final staticId = tracker.tracks.first.trackId;
       // Now jitter very slightly — should still match same track via IoU
       for (var i = 0; i < 5; i++) {
-        tracker.update([_det(0.5 + i * 0.005, 0.5)]);
+        tracker.update([_det(0.5 + i * 0.0005, 0.5)]);
       }
       final track = tracker.tracks.where((t) => t.trackId == staticId);
       expect(track.length, 1);
       expect(track.first.isStatic, isTrue);
+    });
+
+    test('static flag clears when object starts moving (static → dynamic)', () {
+      final tracker = ByteTrackTracker(staticMinFrames: 10, staticMaxDisplacement: 0.01);
+      // Static for 15 frames
+      for (var i = 0; i < 15; i++) {
+        tracker.update([_det(0.5, 0.5)]);
+      }
+      expect(tracker.tracks.first.isStatic, isTrue);
+      // Now move significantly — simulate ball being kicked
+      for (var i = 0; i < 12; i++) {
+        tracker.update([_det(0.5 + i * 0.03, 0.5)]);
+      }
+      final track = tracker.tracks.first;
+      expect(track.isStatic, isFalse);
+    });
+
+    test('dynamic flag resets to static when object stops (dynamic → static)', () {
+      final tracker = ByteTrackTracker(staticMinFrames: 10, staticMaxDisplacement: 0.01);
+      // Move for 10 frames
+      for (var i = 0; i < 10; i++) {
+        tracker.update([_det(0.2 + i * 0.02, 0.5)]);
+      }
+      expect(tracker.tracks.first.isStatic, isFalse);
+      // Now stay still long enough to flush the entire sliding window (default 30)
+      final stopX = 0.2 + 9 * 0.02;
+      for (var i = 0; i < 35; i++) {
+        tracker.update([_det(stopX, 0.5)]);
+      }
+      expect(tracker.tracks.first.isStatic, isTrue);
+    });
+
+    test('full cycle: static → kicked → lands → static again', () {
+      final tracker = ByteTrackTracker(staticMinFrames: 10, staticMaxDisplacement: 0.01);
+      // Phase 1: ball on ground, stationary
+      for (var i = 0; i < 12; i++) {
+        tracker.update([_det(0.3, 0.5)]);
+      }
+      expect(tracker.tracks.first.isStatic, isTrue);
+
+      // Phase 2: ball kicked — fast movement
+      for (var i = 0; i < 12; i++) {
+        tracker.update([_det(0.3 + i * 0.03, 0.5 - i * 0.02)]);
+      }
+      expect(tracker.tracks.first.isStatic, isFalse);
+
+      // Phase 3: ball lands and sits still at new position
+      final landX = 0.3 + 11 * 0.03;
+      final landY = 0.5 - 11 * 0.02;
+      for (var i = 0; i < 12; i++) {
+        tracker.update([_det(landX, landY)]);
+      }
+      expect(tracker.tracks.first.isStatic, isTrue);
     });
   });
 
