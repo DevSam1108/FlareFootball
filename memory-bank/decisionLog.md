@@ -1072,6 +1072,21 @@
 - **Trade-offs Accepted:** Additional CustomPainter in render Stack. Minor visual clutter during debug. Zero cost when disabled.
 - **Status:** Accepted
 
+### ADR-067: Sliding Window Displacement for Two-Way isStatic Classification
+
+- **Date:** 2026-04-13
+- **Context:** ISSUE-027 — ByteTrack's `isStatic` flag was permanently one-way (once `true`, never cleared). Additionally, the lifetime `_cumulativeDisplacement` accumulator prevented re-classification as static after movement. BallIdentifier uses `isStatic` to filter re-acquisition candidates, so a stuck flag made the real ball invisible to the system. Research into standard trackers (ByteTrack, SORT, DeepSORT, OC-SORT, Norfair) confirmed none have static classification — this is a custom addition. Frigate NVR was the only production system found with static object detection.
+- **Options Considered:**
+  1. **Velocity-based clearing** — clear `isStatic` when velocity > threshold for N consecutive frames. Fixes `true→false` but not `false→true`.
+  2. **Reset on KickDetector transition** — clear flag on `confirming`. Couples ByteTrack to KickDetector. Fixes `true→false` only.
+  3. **Cumulative displacement reset** — reset accumulator on velocity spike. Fragile threshold, still lifetime-based.
+  4. **Two-way in evaluateStatic()** — add `else if` branch. Fixes `true→false` but accumulator still prevents `false→true`.
+  5. **Sliding window displacement (Frigate-inspired)** — replace lifetime accumulator with `ListQueue<double>` of last N frame displacements. Sum only recent window. Both transitions automatic.
+- **Decision:** Option 5 — sliding window displacement
+- **Rationale:** Only approach that fixes BOTH directions (`true→false` and `false→true`). Consistent with Frigate NVR's production pattern. No coupling to other services. Same parameters (`staticMinFrames`, `staticMaxDisplacement`) work unchanged. Self-correcting — no explicit reset logic needed.
+- **Trade-offs Accepted:** `ListQueue` per `_STrack` (~30 doubles = ~240 bytes per track). Negligible memory impact. Window size determines response latency — 30 frames means ~1 second delay before classification changes.
+- **Status:** Accepted. Device-verified on iPhone 12.
+
 ---
 
 *Decision log created: 2026-03-13*

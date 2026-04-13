@@ -233,7 +233,7 @@ The following require explicit discussion before changes are made:
 | Trail dots on non-ball objects | Identified 2026-04-08 | Orange dots appear on player body, poster, other non-ball objects. Root cause: BallIdentifier re-acquires to wrong tracks. Trail-gating on kick state attempted and reverted (killed all visualization). See ISSUE-024, ADR-062. |
 | Phantom impact decisions during idle | Log pollution | ImpactDetector fires decisions during kick=idle. NOT announced (KickDetector result gate works). Diagnostic log noise only. Kick-state gate attempted and reverted. |
 | **Mahalanobis rescue identity hijacking (ISSUE-026)** | **🔴 CRITICAL** | **Locked track jumps to false positives via Mahalanobis distance. Causes total tracking loss. Debug overlay confirmed visually. Fix: add bbox size/aspect ratio validation on rescue.** |
-| **isStatic flag never clears (ISSUE-027)** | **🟡 BUG** | **ByteTrack static classification is one-way. Ball kicked → still isStatic=true on original track. Only new trackIds get isStatic=false. Fix: add velocity-based clearing.** |
+| **~~isStatic flag never clears (ISSUE-027)~~** | **✅ FIXED (2026-04-13)** | **Replaced lifetime cumulative displacement with sliding window (last 30 frames). `isStatic` now two-way. Device-verified.** |
 | **directZone unreliable for non-bottom zones** | **🟡 DESIGN** | **directZone reports first zone entered (zone 1 for upward kicks), not impact zone. Calibration-sensitive. 0/5 to 3/4 correct depending on calibration. Needs rethink.** |
 
 > **Full issue history:** See `memory-bank/issueLog.md` for all issues with root causes and verified solutions.

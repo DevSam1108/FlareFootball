@@ -3,14 +3,11 @@
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
 ## Current Focus
-**Debug bbox overlay and calibration diagnostics added; directZone proven unreliable (2026-04-09).** Extensive kick-by-kick testing across 3 sessions revealed that directZone (the primary decision signal from earlier this session) is fundamentally flawed — it reports the FIRST zone the ball enters (always zone 1 for upward kicks) rather than the impact zone. Results are highly calibration-sensitive: same video produced 5/5 correct (Session 0), 0/5 correct (Session 1), and 3/4 correct (Session 2 Test 1) depending on 4-corner tap positions.
+**ISSUE-027 (isStatic) fixed and device-verified (2026-04-13).** The `isStatic` flag in ByteTrack's `_STrack` was a one-way permanent flag — once set to `true`, it never cleared even when the ball was kicked. This caused BallIdentifier to reject the real ball track during re-acquisition. Fixed by replacing the lifetime cumulative displacement accumulator with a sliding window (`ListQueue<double>`, last 30 frames). The flag now transitions both directions automatically. Research into ByteTrack/SORT/DeepSORT/OC-SORT/Norfair confirmed none have static classification; the approach was inspired by Frigate NVR's production implementation (IOU-based position stability over frame windows with counter reset on motion).
 
-Two diagnostic tools were added this session: (1) **Calibration geometry diagnostics** — logs 15+ geometric parameters at every calibration for cross-session comparison. (2) **Debug bounding box overlay** — visual overlay showing colored bboxes for all ball-class detections (green=locked, yellow=candidates, red=lost) with trackId, bbox dimensions, aspect ratio, confidence, isStatic flag. Togglable via `_debugBboxOverlay` const.
-
-Three critical bugs discovered through visual debugging:
+Remaining critical bugs from previous session:
 1. **Mahalanobis rescue hijacks ball identity (ISSUE-026)** — locked track jumps from real ball to false positives via Mahalanobis matching. Causes total tracking loss.
-2. **isStatic flag never clears (ISSUE-027)** — ByteTrack static classification is one-way. Ball kicked → still isStatic=true on original track.
-3. **YOLO false positives on kicker body at high confidence** — head (ar:0.9-1.0, c:0.95+), torso (ar:2.4-3.6, c:0.99+).
+2. **YOLO false positives on kicker body at high confidence** — head (ar:0.9-1.0, c:0.95+), torso (ar:2.4-3.6, c:0.99+). Needs bbox shape/size filtering.
 
 ### Monitor Test Results — Session 2 (2026-04-09, with calibration diagnostics + debug overlay)
 
@@ -115,13 +112,14 @@ Android test device changed from **Galaxy A32 (SM-A325F)** to **Realme 9 Pro+ (S
 - **Camera alignment aids (2026-04-08)** — Center crosshair, tilt indicator, shape validation in `CalibrationOverlay`. Device-verified on iPhone 12.
 - **Large result overlay temporarily commented out (2026-04-08)** — Center-screen zone number / MISS overlay disabled for testing phase. Audio + bottom-right badge still announce results.
 - **Code snapshots directory (2026-04-08)** — `memory-bank/snapshots/` for pre-change backups of source files before risky edits.
-- **Code quality** — `flutter analyze` 0 errors, 0 warnings, 56 infos. `flutter test` 173/173.
+- **Two-way isStatic classification (2026-04-13, ISSUE-027 FIXED)** — ByteTrack `_STrack.evaluateStatic()` now uses sliding window displacement (last 30 frames) instead of lifetime cumulative accumulator. Flag transitions both ways: `false→true` when ball stops, `true→false` when ball moves. Inspired by Frigate NVR's production static object detection. Device-verified on iPhone 12.
+- **Code quality** — `flutter analyze` 0 errors, 0 warnings, 81 infos. `flutter test` 176/176.
 - **Evaluation documentation** — `docs/` and `result/android/` contain evidence from both platforms.
 
 ## What Is Partially Done / In Progress
 - **directZone decision logic — PROVEN UNRELIABLE** — Reports first zone entered (always zone 1 for upward kicks), not impact zone. 0/5 to 3/4 correct depending on calibration. Needs fundamental rethink.
 - **Mahalanobis rescue identity hijacking (ISSUE-026, CRITICAL)** — Locked track jumps to false positives. Causes total tracking loss. Fix: bbox size/aspect ratio validation on rescue.
-- **isStatic flag never clears (ISSUE-027)** — One-way static classification on existing tracks. Fix: velocity-threshold clearing.
+- **~~isStatic flag never clears (ISSUE-027)~~** — ✅ FIXED (2026-04-13). Sliding window displacement replaces lifetime accumulator. Device-verified.
 - **`tennis-ball` accepted at priority 2** — Diagnostic concession from Phase 9; unnecessary but harmless.
 - **Ball identifier re-acquisition** — Picks up player walking, target circles on bounce-back. Needs conservative re-acquisition during idle state.
 - **False trail dots on non-ball objects** — Orange trail dots appear on player body, poster, and other non-ball objects when BallIdentifier re-acquires to wrong track. Root cause is BallIdentifier track identity, not trail timing.
@@ -291,7 +289,6 @@ flutter run
 
 ## Immediate Next Steps
 1. **Fix Mahalanobis rescue identity hijacking (ISSUE-026)** — Add bbox size/aspect ratio validation before Mahalanobis rescue matches a detection to the locked track. Reject if bboxArea > 3x reference or aspect ratio > 1.5.
-2. **Fix isStatic flag (ISSUE-027)** — Add logic to clear isStatic when velocity exceeds threshold for N consecutive frames, or reset on KickDetector confirming transition.
-3. **Add YOLO false positive bbox filter** — Reject ball-class detections where bboxArea > 3x reference or aspect ratio > 1.5. Eliminates torso/jacket false positives (ar:2.4-3.6).
-4. **Rethink zone determination approach** — directZone unreliable for upward kicks. Options: (a) trajectory extrapolation to wall, (b) WallPlanePredictor as primary (4/4 correct on Test 1), (c) hybrid, (d) delay decision until depthRatio ~1.0.
-5. **Test with debug overlay on real field** — Verify if same identity corruption patterns occur with real kicks.
+2. **Add YOLO false positive bbox filter** — Reject ball-class detections where bboxArea > 3x reference or aspect ratio > 1.5. Eliminates torso/jacket false positives (ar:2.4-3.6).
+3. **Rethink zone determination approach** — directZone unreliable for upward kicks. Options: (a) trajectory extrapolation to wall, (b) WallPlanePredictor as primary (4/4 correct on Test 1), (c) hybrid, (d) delay decision until depthRatio ~1.0.
+4. **Test with debug overlay on real field** — Verify if isStatic fix + remaining identity corruption patterns hold with real kicks.

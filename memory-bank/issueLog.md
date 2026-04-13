@@ -8,15 +8,15 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 **Date:** 2026-04-09
 **Platform:** iOS (iPhone 12)
-**Symptom:** When the ball is kicked, the locked track (original trackId from calibration) retains `isStatic=true` even though the ball is in motion. KickDetector reaches `confirming` but may drop back to `idle` before the decision fires, blocking announcements. Only NEW tracks born during motion get `isStatic=false`.
+**Symptom:** When the ball is kicked, the locked track (original trackId from calibration) retains `isStatic=true` even though the ball is in motion. KickDetector reaches `confirming` but may drop back to `idle` before the decision fires, blocking announcements. Only NEW tracks born during motion get `isStatic=false`. Additionally, `isStatic` never re-triggers on subsequent stationary periods — once `false`, stays `false` forever because `_cumulativeDisplacement` retains displacement from previous movement.
 
-**Root Cause:** ByteTrack's static detection uses `staticMinFrames=30` and `staticMaxDisplacement=0.02` to SET `isStatic=true`. No corresponding logic exists to CLEAR it when the track starts moving. Ball sits on ground for hundreds of frames (firmly static), then is kicked — flag never resets.
+**Root Cause:** Two bugs in `_STrack.evaluateStatic()`: (1) `isStatic` was a one-way flag — `if (!isStatic && ...)` only set to `true`, never cleared. (2) `_cumulativeDisplacement` was a lifetime accumulator that only grew — after any movement, the total exceeded `maxDisp` forever, preventing re-classification as static.
 
 **Evidence:** Debug bbox overlay showed `S` (isStatic) label on locked ball track during flight. Test 1 Kick 1: `kick=confirming` coexisted with `isStatic=true`, `kickState` dropped to `idle` by decision time. New trackIds born in flight had `isStatic=false` and reached `kickState=active` normally.
 
-**Solution:** Pending. Options: (a) velocity-threshold clearing, (b) reset on KickDetector confirming, (c) clear on Mahalanobis rescue.
+**Solution:** Replaced lifetime `_cumulativeDisplacement` accumulator with sliding window `ListQueue<double>` (capacity = 30 frames). `evaluateStatic()` now sums only the recent window and sets `isStatic` based on whether total < threshold, making it fully two-way. Approach inspired by Frigate NVR's production static object detection. Research confirmed no standard tracker (ByteTrack/SORT/DeepSORT/OC-SORT/Norfair) has static classification.
 
-**Status:** Identified. Not yet fixed.
+**Status:** ✅ FIXED (2026-04-13). Device-verified on iPhone 12. 3 new unit tests added. 176/176 passing.
 
 ---
 

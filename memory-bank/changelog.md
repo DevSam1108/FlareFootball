@@ -2,6 +2,23 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## ISSUE-027 Fix: Two-Way isStatic Classification via Sliding Window (2026-04-13)
+
+### Summary
+Fixed the one-way `isStatic` flag bug in ByteTrack's `_STrack` class. The flag was permanently set to `true` after 30 frames of low displacement and never cleared — causing BallIdentifier to reject the real ball track during re-acquisition after kicks. Also discovered a second bug: `isStatic` never re-triggered on subsequent stationary periods because the lifetime `_cumulativeDisplacement` accumulator retained displacement from previous movement. Both bugs fixed by replacing the accumulator with a sliding window (`ListQueue<double>`, capacity=30 frames). Research into ByteTrack/SORT/DeepSORT/OC-SORT/Norfair/Frigate NVR confirmed the approach is consistent with Frigate's production static object detection (the only tracker with static classification). Device-verified on iPhone 12.
+
+### Modified Files
+- **`lib/services/bytetrack_tracker.dart`** — Added `import 'dart:collection'`. Replaced `_cumulativeDisplacement` (double) with `_recentDisplacements` (`ListQueue<double>`). Added `_displacementWindowSize` field. `update()` pushes per-frame displacement to buffer with FIFO eviction. `evaluateStatic()` now two-way: sums window, sets `isStatic = recentTotal < maxDisp` when window is full.
+- **`test/bytetrack_tracker_test.dart`** — Renamed `'static flag is permanent once set'` → `'static flag stays true with minor jitter'`. Added 3 new tests: `static → dynamic` transition, `dynamic → static` transition, `full cycle: static → kicked → lands → static again`.
+
+### Verification
+```
+$ flutter analyze -- 0 errors, 0 warnings, 81 infos
+$ flutter test -- 176/176 passing
+```
+
+---
+
 ## Calibration Diagnostics + Debug Bbox Overlay + Enhanced BallIdentifier Logging (2026-04-09)
 
 ### Summary

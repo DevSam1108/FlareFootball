@@ -15,8 +15,8 @@
 - ✅ GSD planning infrastructure: `.planning/` with `ROADMAP.md`, `REQUIREMENTS.md`, `MILESTONES.md`, `STATE.md`, `PROJECT.md`
 
 ### Code Quality
-- ✅ `flutter analyze` -- 0 errors, 0 warnings, 78 infos
-- ✅ `flutter test` -- 173/173 passing (3 widget/DetectorConfig + 16 Kalman + 8 BallTracker + 7 trajectory + 8 homography + 10 zone mapper + 4 coord utils + 22 impact detector + 3 audio service + 15 kick detector + 12 wall_plane_predictor + 26 bytetrack + 19 ball_identifier)
+- ✅ `flutter analyze` -- 0 errors, 0 warnings, 81 infos
+- ✅ `flutter test` -- 176/176 passing (3 widget/DetectorConfig + 16 Kalman + 8 BallTracker + 7 trajectory + 8 homography + 10 zone mapper + 4 coord utils + 22 impact detector + 3 audio service + 15 kick detector + 12 wall_plane_predictor + 29 bytetrack + 19 ball_identifier)
 - ✅ `withOpacity()` replaced with `withValues(alpha:)` (deprecated API migration)
 - ✅ DIAG-02/03/04/05 temporary diagnostic print statements removed (2026-03-09)
 - ✅ Diagnostic `print()` statements in `ImpactDetector._makeDecision()` intentionally retained for real-world testing analysis
@@ -454,10 +454,9 @@
 - **Blocker:** Locked track jumps to false positives (video player, wall marks, kicker body) via Mahalanobis distance matching. Causes total tracking loss.
 - **Resolution:** Add bbox size/aspect ratio validation on Mahalanobis rescue. Reject if bboxArea > 3x reference or aspect ratio > 1.5.
 
-### ⚙️ isStatic Flag Never Clears (ISSUE-027)
-- **Status:** Identified. Medium priority.
-- **Blocker:** ByteTrack static classification is one-way. Original track stays isStatic=true even when kicked. Affects KickDetector state progression.
-- **Resolution:** Add velocity-threshold clearing logic, or reset on KickDetector confirming transition.
+### ✅ isStatic Flag Never Clears (ISSUE-027) — FIXED (2026-04-13)
+- **Status:** Fixed and device-verified.
+- **Fix:** Replaced lifetime `_cumulativeDisplacement` accumulator in `_STrack` with sliding window `ListQueue<double>` (last 30 frames). `evaluateStatic()` now sums only the window, making `isStatic` fully two-way. Approach inspired by Frigate NVR production implementation. Research confirmed no standard tracker (ByteTrack/SORT/DeepSORT/OC-SORT/Norfair) has static classification — this is a custom addition. 3 new tests added (static→dynamic, dynamic→static, full cycle).
 
 ### ⚠️ directZone Unreliable for Non-Bottom Zones
 - **Status:** Identified. Needs design decision.
