@@ -346,6 +346,35 @@ The detection screen Scaffold has no `appBar`. Navigation back to home is via a 
 ### 9. aaptOptions for TFLite Model Integrity
 Android's `build.gradle` must include `aaptOptions { noCompress 'tflite' }` inside the `android {}` closure. Without this, Gradle compresses the `.tflite` file during APK packaging, which corrupts TFLite's memory-mapped loading. This was the root cause for `onResult` not firing on Android (fixed in Phase 9).
 
+### 16. Programmatic Camera Zoom via YOLOViewController (2026-04-14)
+The `ultralytics_yolo` plugin exposes camera zoom through `YOLOViewController`. To use it, create a controller instance and pass it to `YOLOView`:
+
+```dart
+final _yoloController = YOLOViewController();
+
+YOLOView(
+  modelPath: Platform.isIOS ? 'yolo11n' : 'yolo11n.tflite',
+  controller: _yoloController,
+  ...
+)
+
+// Then call after view is created:
+_yoloController.setZoomLevel(2.5);
+```
+
+**How it works:** `setZoomLevel()` sets `device.videoZoomFactor` (iOS) or `cam.cameraControl.setZoomRatio()` (Android). This is **digital zoom** — the camera sensor crops the center portion and upscales to fill the frame. The frame resolution stays the same (4032×3024 on iOS), but objects appear larger because the field of view is narrower.
+
+**Why this matters for detection:** YOLO11n's inference resolution is hardcoded at 640×640. The native frame is downscaled 6.3× (4032→640). A ball at 180px native → 29px at inference (borderline). At 2.5× zoom, the same ball appears 450px native → 71px at inference (well above the 32px reliable detection threshold).
+
+**Constraints:**
+- Zoom range: 1.0×-10.0× (iOS), device-dependent (Android)
+- Digital zoom only — quality degrades above ~3-4× on iPhone 12
+- Narrower field of view means wide kicks may exit frame
+- `onZoomChanged` callback available for tracking current zoom level
+- Pinch-to-zoom gesture also works (built into plugin) and updates `lastZoomFactor`
+
+**Planned use:** Auto-calculated after quick target scan in Guided Setup Flow Step 3. Zoom level derived from target coverage in frame to ensure ball stays above YOLO's minimum detection threshold throughout its flight.
+
 ---
 
 ## Key File Map

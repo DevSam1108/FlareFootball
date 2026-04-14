@@ -3,12 +3,24 @@
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
 ## Current Focus
-**Pre-ByteTrack AR filter implemented and device-tested (2026-04-13).** A simple upper-bound aspect ratio filter (`ar > 1.8`) rejects elongated YOLO false positives (torso/limb bboxes, AR 2.4-3.6) before they enter ByteTrack. Device-tested on monitor — reduced false positive trail dots on player body. Clean visual output with debug overlay disabled. 176/176 tests passing.
+**Guided Setup Flow with Auto-Zoom — design discussion complete, open design questions pending (2026-04-14).** Developer conducted controlled monitor+video tests and identified that camera distance and lateral offset are the #1 factors in detection reliability — more impactful than any software filter. When setup geometry is correct, even player head false positives (AR ~0.9) disappear entirely. This led to discovery that `ultralytics_yolo` plugin supports programmatic camera zoom via `YOLOViewController.setZoomLevel()`. Auto-zoom after calibration can compensate for distance, keeping the ball above YOLO's minimum reliable detection threshold (~32px at 640 inference resolution).
 
-### What Was Done This Session (2026-04-13)
-1. **Attempted Mahalanobis rescue validation** — size ratio + velocity direction checks inside `_greedyMatch()` in `bytetrack_tracker.dart`. Reverted at developer request to maintain one-change-at-a-time discipline. The Mahalanobis rescue remains unguarded (ISSUE-026 still open).
-2. **Added pre-ByteTrack AR filter** — 2 lines in `_toDetections()` in `live_object_detection_screen.dart`. Initially had both upper (>1.8) and lower (<0.55) bounds; lower bound removed after discussion since no false positives have tall-narrow bboxes and the lower bound may have been intermittently rejecting real ball detections.
-3. **Debug bbox overlay disabled** — `_debugBboxOverlay = false` (set manually by developer). Overlay revealed that track ID churn and dual detections on same ball were always happening but don't affect functional behavior — BallIdentifier only follows the locked (green) track.
+### What Was Done This Session (2026-04-14)
+1. **Developer observations from controlled testing** — distance from target and lateral camera offset are the primary drivers of detection accuracy. At the "right" distance/angle, false positives disappear without software filters. At wrong distances, AR filter alone cannot prevent false detections.
+2. **Research: YOLO11n minimum pixel thresholds** — COCO standard: small objects < 32×32px. At 640 inference resolution, YOLO11n's practical detection floor is ~32px. Developer's log data confirms: stationary ball at ~29px inference resolution (borderline), ball at target drops to ~13px (well below threshold). Sources: arxiv.org/html/2504.09900v1, ultralytics/yolov5#10880.
+3. **Plugin API exploration** — `ultralytics_yolo ^0.2.0` supports:
+   - ✅ `setZoomLevel(double)` — real camera digital zoom (iOS: `device.videoZoomFactor`, Android: CameraX `setZoomRatio()`)
+   - ✅ Range 1.0×-10.0× on iOS, device-dependent on Android
+   - ✅ Zoom affects the frame YOLO receives (not just UI scaling)
+   - ❌ Inference resolution (640) — hardcoded, not configurable
+   - ❌ ROI cropping — not supported
+4. **Guided Setup Flow redesigned** — 8-step flow with auto-zoom integrated (see below). Previous 7-step flow (LOCKED 2026-04-06) superseded. Text-based instructions at bottom center (not voice-first — user is at the tripod during setup). Voice only used for auto-zoom feedback (Step 3).
+5. **No code changes this session** — discussion and design only.
+
+### Previous Session (2026-04-13)
+1. **Pre-ByteTrack AR filter** — `ar > 1.8` in `_toDetections()`. Monitor-tested, reduced false positive trail dots. Still in place.
+2. **Debug bbox overlay disabled** — `_debugBboxOverlay = false`.
+3. **Mahalanobis rescue validation** — implemented and reverted. ISSUE-026 still open.
 
 ### Failed Approach (2026-04-13, earlier session) — DO NOT REPEAT
 Implemented a 2-layer filter: (1) DetectionFilter pre-ByteTrack (AR + size hard reject), (2) TrackQualityGate post-ByteTrack (init delay + rolling median), (3) Mahalanobis rescue validation (size ratio + velocity direction). Device testing showed:
@@ -193,53 +205,78 @@ Each zone is approximately 587mm x 373mm.
 | **FALSE POSITIVE FIX** | **Remove circles from physical target fabric** | **🟡 PHYSICAL CHANGE NEEDED** |
 | **Guided Setup Flow** | **Voice-guided camera positioning with auto-lock (7-step flow)** | **🔴 NEXT — #1 FEATURE** |
 
-### User Experience Flow (LOCKED 2026-04-06)
+### User Experience Flow (REVISED 2026-04-14 — supersedes 2026-04-06 version)
 
-**Step 1: Static instruction screen (before camera)**
-Illustration showing tripod behind kicker, centered on target. Voice: *"Place your phone on the tripod, behind the kicking spot, facing the target."* → Tap Next.
+**Physical setup:** Tripod + phone is behind the kicking spot, facing the target (~10-15m to target). Kicking spot is ~3-5m in front of the tripod. User stands at the tripod for all setup steps, then walks forward to the kicking spot and never returns to the phone.
 
-**Step 2: Tap 4 corners (existing behavior)**
-Camera preview loads in landscape. Voice: *"Tap the 4 draggable corners of the target."* User taps TL, TR, BR, BL.
+**Step 0: App launch**
+User opens app → Home screen → Taps "Start Detection" → Camera preview opens → Rotate-to-landscape overlay → User rotates to landscape → Overlay disappears.
 
-**Step 3: Guided position adjustment (NEW — one issue at a time)**
-Green grid appears. Voice-guided position checks from the 4 corner positions:
-- Distance check → *"Move 2 steps closer"* / *"Move 5 steps back"*
-- Centering check → *"Move camera a little left"* / *"Move camera right"*
-- Height check → *"Move camera up"* / *"Move camera down"*
-- Angle check → *"Straighten camera"*
-- Stability check → *"Hold steady..."*
+**Step 1: Setup instruction overlay**
+Screen shows overlay image in landscape illustrating correct setup (tripod behind kicking spot, facing target).
+Text at bottom center: *"Place your phone on the tripod, behind the kicking spot, facing the target as per the above overlay."*
+User taps Next.
 
-Color-coded quadrilateral border: Red = not ready, Yellow = almost there, Green = good.
-One instruction at a time. Each criterion shows a small checkmark when passed.
-As user adjusts tripod, they re-tap corners (or corners auto-update if edge detection added later).
+**Step 2: Quick target scan (NEW)**
+Text at bottom center: *"Tap anywhere on the target in the frame."*
+User taps roughly on the target area. Taps Next.
+Purpose: gives the app a rough sense of target location and size for auto-zoom calculation.
 
-**Step 4: Auto-lock**
-When all criteria green for 1+ second → haptic vibration → Voice: *"Position locked."* → Enable next step.
+**Step 3: Auto-zoom (NEW — no user action)**
+Voice: *"Adjusting zoom for best detection..."*
+App calculates optimal zoom from rough target position/size.
+View zooms in. Voice: *"Zoom set."*
+Automatically moves to Step 4.
 
-**Step 5: Reference ball capture (existing behavior)**
-Voice: *"Place the ball on the target."* → YOLO detects ball → red bounding box → user taps Confirm.
+**Step 4: Tap 4 corners**
+Text at bottom center: *"Tap corner 1 of 4: Top-Left"* (existing behavior)
+User taps TL, TR, BR, BL on the zoomed view. Green grid appears. Corners are draggable for fine-tuning.
+User taps Next when satisfied with corner placement.
 
-**Step 6: Live detection starts**
-Voice: *"All set. Start kicking!"* → *"Ready — waiting for kick."*
+**Step 5: Position quality validation**
+App checks from the 4 corners: target coverage, centering, angle, stability.
+Color-coded border: Red → Yellow → Green.
+One instruction at a time via text: *"Move camera a little left"*, *"Straighten camera"*, etc.
+Each criterion shows a checkmark when passed.
+All criteria green for 1+ second → haptic vibration → overlay: **"Position Locked"** → auto-moves to Step 6.
+If user can't pass: adjust tripod, go back to Step 4 to re-tap corners.
 
-**Step 7: Kick detection (existing behavior)**
-Ball kicked → KickDetector gates → ImpactDetector tracks → zone announced → *"You hit seven!"* + crowd cheer + zone highlights yellow + large overlay (3s). Miss → buzzer + *"MISS"*. 3-second cooldown → auto-reset → *"Ready — waiting for kick."*
+**Step 6: Reference ball capture (existing behavior)**
+Text at bottom center: *"Place ball on target — point camera at ball"*
+Ball detected → text: *"Ball detected — tap Confirm"*
+Red bounding box. User taps Confirm.
+App validates ball size is sufficient for reliable detection.
 
-**Design principles (from research):**
-- Voice-first: user is 10m away from phone, cannot read screen
+**Step 7: All set — user walks away**
+Voice: *"All set. Walk to the kicking spot and start kicking!"*
+User walks ~3-5m forward to the kicking spot.
+
+**Step 8: Live detection (existing behavior)**
+Text at bottom-right: *"Ready — waiting for kick"*
+User kicks → zone result displayed as text at bottom-right + audio announcement.
+User stays at the kicking spot (~3-5m in front of tripod, facing target). All feedback is audio. User never returns to the phone.
+
+**Design principles:**
+- Text-based during setup (user is at the tripod, can see screen)
+- Voice used for auto-zoom feedback and live detection results (user facing away from phone after Step 7)
 - One instruction at a time: don't overwhelm with all criteria simultaneously
 - Color-coded feedback: universally understood, no reading needed
-- Auto-confirmation: no manual "I'm positioned right" tap
-- Real-world precedent: HomeCourt (AR overlay), PB Vision (CourtFocus lock-on), Google Guided Frame (voice + auto-capture), Scanbot (dynamic state-based instructions)
+- Auto-confirmation for position lock: no manual "I'm positioned right" tap
+- Auto-zoom: compensates for distance, user doesn't need to find the "perfect" tripod position
 
 **Position quality checks (all derived from 4 corner taps, no complex math):**
 | Check | Measurement | Ideal Range |
 |-------|-------------|-------------|
-| Distance | Target width as % of frame | 30-50% |
+| Distance | Target coverage after zoom | TBD (needs validation) |
 | Centering | Centroid X vs frame center | Within ~10% |
 | Height | Centroid Y vs frame center | Within ~15% |
 | Angle | Top edge ≈ bottom edge length | Within ~15% |
 | Stability | Corner positions stable | 0.5s no movement |
+
+**Open design questions (2026-04-14):**
+1. How does a single tap in Step 2 give enough info for zoom calculation? May need two taps (opposite corners) instead.
+2. What target coverage % to aim for after zoom? Need to derive from 32px YOLO threshold.
+3. Position validation thresholds — are the ideal ranges still correct?
 
 ---
 
@@ -278,6 +315,14 @@ Ball kicked → KickDetector gates → ImpactDetector tracks → zone announced 
 **Decision date:** 2026-04-09
 **Rationale:** Video test analysis showed directZone (ball's actual position mapped through homography) was correct 5/5 times. WallPlanePredictor, depth-verified zone, and extrapolation all had accuracy and reliability problems. directZone is the simplest and most accurate signal — no prediction, no extrapolation, just where the ball actually is when it's inside the grid. Decision cascade replaced with: edge exit → last directZone → noResult. If the ball never entered the grid, no decision is made.
 
+### Key Decision: Auto-Zoom via Plugin API for Detection Reliability (2026-04-14)
+**Decision date:** 2026-04-14
+**Rationale:** Developer's controlled testing revealed that camera distance and lateral offset are the primary drivers of detection accuracy — more impactful than any software filter. At the "right" setup geometry, even unfilterable false positives (player head AR ~0.9) disappear. Root cause: ball pixel size at YOLO's 640 inference resolution. Stationary ball ≈ 29px (borderline), ball at target ≈ 13px (well below 32px threshold). `ultralytics_yolo` plugin exposes `YOLOViewController.setZoomLevel()` which applies real camera digital zoom before YOLO inference. At 2.5× zoom, ball at target would be ~33px at inference — above the threshold. Auto-zoom calculated from calibration data (target coverage) replaces the need to find the "perfect" distance manually.
+
+### Key Decision: Guided Setup Flow Redesigned with Auto-Zoom (2026-04-14)
+**Decision date:** 2026-04-14
+**Rationale:** Previous 7-step flow (2026-04-06) superseded. New 8-step flow integrates auto-zoom between quick target scan and precise corner calibration. Key changes: (1) Quick target scan before corner taps to enable zoom calculation, (2) Auto-zoom sets camera zoom before precise calibration, (3) Corner taps happen on zoomed view — no re-calibration needed, (4) "Position Locked" overlay confirms setup completion, (5) Text-based instructions during setup (user is at tripod), voice only for auto-zoom feedback and live detection.
+
 ### Key Decision: Accept `confirming` in Result Gate (2026-04-09)
 **Decision date:** 2026-04-09
 **Rationale:** KickDetector requires 3 sustained high-speed frames to reach `active`, but fast kicks often have fewer tracked frames. `confirming` already means a jerk spike was detected (explosive onset = real kick). Combined with directZone requirement (ball must have entered the grid), `confirming` is sufficient — false positives are filtered by requiring non-null directZone.
@@ -306,15 +351,19 @@ flutter run
 ```
 
 ## Immediate Next Steps — INCREMENTAL, ONE AT A TIME
-**Rule: Implement ONE filter, device-test, confirm no regression, then move to next.**
 
-1. **Field test AR filter (2026-04-13)** — AR > 1.8 filter is in place and monitor-tested. Needs field test at real distance with actual kicker to confirm torso false positives are caught and real ball is never rejected.
+1. **Resolve open design questions for Guided Setup Flow + Auto-Zoom (2026-04-14)** — Three questions pending discussion before any code:
+   - Step 2 (quick target scan): single tap vs two-tap for zoom calculation
+   - Step 3 (auto-zoom): target coverage % after zoom
+   - Step 5 (position validation): threshold values
 
-2. **Mahalanobis rescue validation (ISSUE-026)** — After AR filter is field-validated, re-apply size ratio + velocity direction checks inside `_greedyMatch()`. Code was written and tested this session (176/176 pass) but reverted to maintain one-change-at-a-time. Can be re-applied quickly.
+2. **Implement Guided Setup Flow with Auto-Zoom** — 8-step flow as agreed. Key new components: setup instruction overlay (Step 1), quick target scan (Step 2), auto-zoom via `YOLOViewController.setZoomLevel()` (Step 3), position quality validation (Step 5), "Position Locked" overlay.
 
-3. **Rethink zone determination** — directZone unreliable for upward kicks. Options: (a) WallPlanePredictor as primary (4/4 correct on Test 1), (b) delay decision until depthRatio ~1.0, (c) trajectory extrapolation.
+3. **Field test AR filter (2026-04-13)** — AR > 1.8 filter is in place and monitor-tested. Needs field test.
 
-4. **Guided Setup Flow** — #1 feature after tracking is stable. Voice-guided camera positioning with auto-lock (7-step flow).
+4. **Mahalanobis rescue validation (ISSUE-026)** — After AR filter is field-validated, re-apply size ratio + velocity direction checks inside `_greedyMatch()`.
+
+5. **Rethink zone determination** — directZone unreliable for upward kicks. Options: (a) WallPlanePredictor as primary, (b) delay decision until depthRatio ~1.0, (c) trajectory extrapolation.
 
 ### Approaches Validated by Research (for reference)
 - **Proven in production:** AR filter, size filter, min track age, velocity consistency (Frigate NVR, Hawk-Eye, Norfair, OC-SORT, Roboflow)

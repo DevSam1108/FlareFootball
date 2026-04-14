@@ -365,19 +365,35 @@
 
 **Full analysis:** `memory-bank/field-test-analysis-2026-04-04.md`
 
-### Guided Setup Flow (Voice-Guided Camera Positioning)
-🔴 **Status:** APPROACH LOCKED (2026-04-06). Not yet implemented.
+### Guided Setup Flow with Auto-Zoom
+🔴 **Status:** FLOW AGREED (2026-04-14). Open design questions pending. Not yet implemented.
 
-**Problem:** Camera setup (distance, centering, height, angle) directly affects zone prediction accuracy. The one-row-down error (Bug 3) may be caused by camera being below target center height. No sports app compensates for bad setup — they all guide the user into a good setup first.
+**Problem:** Camera setup geometry (distance, lateral offset) is the #1 factor in detection reliability — more impactful than any software filter. Developer's controlled testing (2026-04-14) confirmed: at correct distance/angle, false positives disappear entirely; at wrong geometry, software filters cannot compensate.
 
-**Research (2026-04-06):** Studied HomeCourt (AR overlay), PB Vision (CourtFocus lock-on), SwingVision (remote preview), Scanbot (dynamic state feedback), Google Guided Frame (voice + auto-capture), Apple Face ID (progressive circle), TADA app (color-coded borders). Key finding: voice-first feedback is essential when user is 10m from phone on tripod.
+**Key discovery (2026-04-14):** `ultralytics_yolo` plugin supports `YOLOViewController.setZoomLevel()` — real camera digital zoom that affects the frame YOLO receives. Auto-zoom can compensate for distance, keeping ball above 32px at YOLO's 640 inference resolution.
 
-**Locked approach:** 7-step flow with voice-first guidance. After user taps 4 corners, app checks 5 criteria (distance, centering, height, angle, stability) from corner positions alone — no complex math. Color-coded quadrilateral border (red/yellow/green). One instruction at a time via TTS. Auto-lock when all criteria green for 1+ second. See `memory-bank/activeContext.md` for full step-by-step flow.
+**Research (2026-04-06):** Studied HomeCourt, PB Vision, SwingVision, Scanbot, Google Guided Frame, Apple Face ID, TADA app.
 
-**Position quality checks:**
+**Research (2026-04-14):** YOLO11n detection thresholds — COCO "small object" = <32×32px. Developer's log data: stationary ball ≈ 29px at inference (borderline), ball at target ≈ 13px (well below threshold). At 2.5× zoom, ball at target ≈ 33px (above threshold).
+
+**Agreed flow (2026-04-14, supersedes 2026-04-06 version):** 8-step flow. Step 0: app launch + landscape. Step 1: setup instruction overlay. Step 2: quick target scan (tap on target). Step 3: auto-zoom. Step 4: tap 4 corners + Next button. Step 5: position quality validation → "Position Locked" overlay. Step 6: reference ball capture (existing). Step 7: user walks to kicking spot. Step 8: live detection. Full details in `memory-bank/activeContext.md`.
+
+**Open design questions (2026-04-14):**
+1. How does a single tap in Step 2 give enough info for zoom calculation?
+2. What target coverage % to aim for after zoom?
+3. Position validation threshold values
+
+**Plugin API confirmed:**
+- `YOLOViewController.setZoomLevel(double)` — iOS: `device.videoZoomFactor`, Android: CameraX `setZoomRatio()`
+- Range: 1.0×-10.0× iOS, device-dependent Android
+- Camera resolution unchanged (4032×3024 iOS) — zoom crops and upscales at sensor level
+- `onZoomChanged` callback available
+- Need to create `YOLOViewController` instance and pass to `YOLOView` via `controller` parameter
+
+**Position quality checks (derived from 4 corner taps):**
 | Check | Measurement | Ideal |
 |-------|-------------|-------|
-| Distance | Target width as % of frame | 30-50% |
+| Distance | Target coverage after zoom | TBD |
 | Centering | Centroid X vs frame center | ±10% |
 | Height | Centroid Y vs frame center | ±15% |
 | Angle | Top edge ≈ bottom edge length | ±15% |
