@@ -15,7 +15,7 @@
 - ✅ GSD planning infrastructure: `.planning/` with `ROADMAP.md`, `REQUIREMENTS.md`, `MILESTONES.md`, `STATE.md`, `PROJECT.md`
 
 ### Code Quality
-- ✅ `flutter analyze` -- 0 errors, 0 warnings, 81 infos
+- ✅ `flutter analyze` -- 0 errors, 0 warnings, 84 infos
 - ✅ `flutter test` -- 176/176 passing (3 widget/DetectorConfig + 16 Kalman + 8 BallTracker + 7 trajectory + 8 homography + 10 zone mapper + 4 coord utils + 22 impact detector + 3 audio service + 15 kick detector + 12 wall_plane_predictor + 29 bytetrack + 19 ball_identifier)
 - ✅ `withOpacity()` replaced with `withValues(alpha:)` (deprecated API migration)
 - ✅ DIAG-02/03/04/05 temporary diagnostic print statements removed (2026-03-09)
@@ -399,6 +399,25 @@
 | Angle | Top edge ≈ bottom edge length | ±15% |
 | Stability | Corner positions stable | 0.5s |
 
+### Session Lock + Protected Track + Trail Suppression (2026-04-15)
+✅ **Status:** IMPLEMENTED & MONITOR-TESTED. Eliminates false positive trail dots. Needs threshold tuning.
+
+**Changes:**
+- **BallIdentifier session lock** — `_sessionLocked` flag blocks Priority 2/3 re-acquisition during active kicks. Activated on `KickDetector.isKickActive`, deactivated on HIT/MISS/LOST decision.
+- **ByteTrack protected track** — `_protectedTrackId` gets 60-frame survival (vs default 30) to maintain locked ball track during flight.
+- **Trail suppression** — TrailOverlay receives empty trail when `kickState == idle`. Dots only shown during confirming/active/refractory.
+- **Bbox area ratio check on Mahalanobis rescue** — Rejects rescue candidates with area >2x or <0.5x track's predicted area. Prevents identity hijacking (ISSUE-026).
+
+**Test results (5 kicks):**
+- 3/5 correctly detected and announced
+- 2/5 silent (no tracking, no decision)
+- 0 false positive dots (was the main goal)
+
+**Known issues:**
+- Area ratio check (2.0/0.5) too aggressive — blocks legitimate tracking during fast kicks. Kalman predicted area diverges during pure predictions, real detections get rejected.
+- Session lock has no safety timeout — can get stuck permanently if locked track is lost without a decision (e.g., bounce-back triggers false kick, ball disappears).
+- Bounce-back after legitimate kick triggers false kick detection.
+
 ### `tennis-ball` Priority 2 Concession (Minor)
 ⚠️ **Status:** Still in code at `live_object_detection_screen.dart:56`. Harmless.
 
@@ -486,6 +505,10 @@
 - **Status:** Identified. Needs design decision.
 - **Blocker:** directZone reports first zone entered (zone 1 for upward kicks), not impact zone. Results calibration-dependent (0/5 to 3/4 correct).
 - **Resolution:** Options: trajectory extrapolation to wall, WallPlanePredictor as primary, hybrid approach, or delay decision until depthRatio ~1.0.
+
+| **Session lock to prevent false positive re-acquisition** | **Manager's suggestion: lock ball trackID during kick, reject all others. Works at BallIdentifier level without modifying ByteTrack matching (avoids pitfalls of detection-level filters).** |
+| **Trail suppression during kick=idle** | **Dots only during confirming/active/refractory. Eliminates visual noise between kicks without affecting pipeline data collection.** |
+| **Bbox area ratio check on Mahalanobis rescue** | **Physical constraint: ball can't change size >2x between frames. Prevents hijacking (3.8x-9x jumps) but 2.0 threshold too aggressive for fast kicks.** |
 
 ---
 

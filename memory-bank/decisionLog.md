@@ -1101,6 +1101,45 @@
 - **Trade-offs Accepted:** Player head (AR 0.9) passes this filter — geometrically identical to ball. Needs separate solution (second-stage classifier or motion channel). Torso bboxes at AR 1.8-2.4 (if they exist) would also pass.
 - **Status:** Accepted. Monitor-tested, pending field test.
 
+### ADR-069: Session Lock to Prevent False Positive Re-acquisition During Kicks
+
+- **Date:** 2026-04-15
+- **Context:** After implementing ByteTrack and BallIdentifier, false positive trail dots appeared on player's body/head between kicks. Root cause: when locked ball track is lost for a few frames, BallIdentifier re-acquires to whatever moves (player head, poster edge) via Priority 2 or 3. Manager suggested: once ball trackID is locked and kick is in progress, reject all other trackIDs until decision is made.
+- **Options Considered:**
+  1. **Detection-level filtering** — filter false positives before ByteTrack. Previously attempted and reverted (ISSUE-028). Starves ByteTrack of detections, breaks re-acquisition.
+  2. **Session lock at BallIdentifier level** — block Priority 2/3 during active kicks. ByteTrack runs unmodified on all detections. No information loss.
+  3. **Tie lock to calibration/setup** — activate lock from reference capture, not kick detection. Simpler but means lock is always on, making re-acquisition impossible.
+- **Decision:** Option 2 — session lock in BallIdentifier, activated by KickDetector `active` state, deactivated on decision.
+- **Rationale:** Works at the right layer (BallIdentifier, not detection pipeline). No starvation risk. Scoped to kick-to-decision window. Combined with protected track (60-frame survival in ByteTrack) to keep locked trackID alive during flight.
+- **Trade-offs Accepted:** If KickDetector misses a kick, session lock never activates — app behaves as before (no benefit, but no regression). Session lock can get stuck if locked track is lost without a decision (ISSUE-030 — needs safety timeout).
+- **Status:** Accepted. Monitor-tested. Needs safety timeout fix.
+
+### ADR-070: Trail Suppression During Kick=Idle
+
+- **Date:** 2026-04-15
+- **Context:** Even with session lock preventing re-acquisition during kicks, false positive dots appeared during idle periods (player positioning ball, walking around). Trail dots are only useful during actual ball flight.
+- **Options Considered:**
+  1. **Keep session lock ON permanently after decision** — no re-acquisition between kicks. Problem: no way to unlock for next kick without tying to KickDetector (which isn't 100% reliable).
+  2. **Trail suppression based on kick state** — always collect trail data in BallIdentifier, but only display dots when kick state is confirming/active/refractory. Simple, no pipeline changes.
+  3. **Clear trail on decision** — wipe trail data after decision. Problem: new false positive dots would immediately appear from re-acquisition to player body.
+- **Decision:** Option 2 — TrailOverlay receives empty list when `kickState == idle`, real trail otherwise.
+- **Rationale:** One line change. Cleanly separates data collection (always running) from visual display (only during kicks). No side effects on pipeline, logging, or decision-making. Eliminates all idle-period false dots.
+- **Trade-offs Accepted:** Ball on ground before kick is not visually tracked (no dots during idle). Acceptable — user doesn't need to see the stationary ball.
+- **Status:** Accepted. Monitor-tested. Working as expected.
+
+### ADR-071: Bbox Area Ratio Check on Mahalanobis Rescue (NEEDS TUNING)
+
+- **Date:** 2026-04-15
+- **Context:** Mahalanobis rescue (ISSUE-026) hijacks locked ball track to false positives (player head, poster) when Kalman covariance grows large during stationary periods. Statistical distance passes even for distant detections. Need a physical constraint to prevent size-mismatched rescues.
+- **Options Considered:**
+  1. **Lower chi-squared threshold** — reduce from 9.488 to a smaller value. Too blunt — would also block legitimate fast-moving ball rescues.
+  2. **Bbox area ratio check** — compare detection area to track's predicted area. Reject if >2x or <0.5x. Physical constraint: ball can't change size dramatically between frames.
+  3. **Last measured area comparison** — compare against last real detection area instead of Kalman predicted. More stable during prediction-only frames.
+- **Decision:** Option 2 initially (with threshold 2.0/0.5). Monitor testing showed it blocks legitimate tracking during fast kicks (Kalman predicted area diverges during pure predictions). Option 3 identified as the better approach but not yet implemented.
+- **Rationale:** Area ratio is the right constraint. The threshold and comparison basis need adjustment. Hijack cases had ratios of 3.8x-9x, so there's room between legitimate variation (~0.8-1.2x frame-to-frame) and hijack jumps.
+- **Trade-offs Accepted:** Current 2.0 threshold causes 2/5 kicks to go silent. Must be tuned before field testing.
+- **Status:** Accepted but NEEDS TUNING (ISSUE-029). Next step: compare against last measured area instead of Kalman predicted, or relax threshold to 3.0-3.5.
+
 ---
 
 *Decision log created: 2026-03-13*

@@ -1,372 +1,102 @@
 # Active Context
 
-> **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
+> **CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past  do NOT repeat.**
 
 ## Current Focus
-**Guided Setup Flow with Auto-Zoom — design discussion complete, open design questions pending (2026-04-14).** Developer conducted controlled monitor+video tests and identified that camera distance and lateral offset are the #1 factors in detection reliability — more impactful than any software filter. When setup geometry is correct, even player head false positives (AR ~0.9) disappear entirely. This led to discovery that `ultralytics_yolo` plugin supports programmatic camera zoom via `YOLOViewController.setZoomLevel()`. Auto-zoom after calibration can compensate for distance, keeping the ball above YOLO's minimum reliable detection threshold (~32px at 640 inference resolution).
+**Session Lock + Protected Track + Mahalanobis Area Ratio Filter  implemented and monitor-tested (2026-04-15).** Manager's suggestions to reduce false positive trail dots led to three new features: (1) session lock in BallIdentifier that prevents re-acquisition during kicks, (2) protected track in ByteTrack that extends locked track survival from 30 to 60 frames, (3) bbox area ratio check on Mahalanobis rescue (reject if detection area >2x or <0.5x the track's predicted area). Also added trail suppression during kick=idle. Monitor+video testing showed **zero false positive dots** but **2 out of 5 kicks went silent** (no tracking, no decision). Root cause identified: area ratio check (2.0 threshold) is too aggressive  blocks legitimate Mahalanobis rescues during fast kicks when Kalman predicted area diverges from real detection area. Fix direction: compare against last measured area instead of Kalman predicted area, or relax threshold.
 
-### What Was Done This Session (2026-04-14)
-1. **Developer observations from controlled testing** — distance from target and lateral camera offset are the primary drivers of detection accuracy. At the "right" distance/angle, false positives disappear without software filters. At wrong distances, AR filter alone cannot prevent false detections.
-2. **Research: YOLO11n minimum pixel thresholds** — COCO standard: small objects < 32×32px. At 640 inference resolution, YOLO11n's practical detection floor is ~32px. Developer's log data confirms: stationary ball at ~29px inference resolution (borderline), ball at target drops to ~13px (well below threshold). Sources: arxiv.org/html/2504.09900v1, ultralytics/yolov5#10880.
-3. **Plugin API exploration** — `ultralytics_yolo ^0.2.0` supports:
-   - ✅ `setZoomLevel(double)` — real camera digital zoom (iOS: `device.videoZoomFactor`, Android: CameraX `setZoomRatio()`)
-   - ✅ Range 1.0×-10.0× on iOS, device-dependent on Android
-   - ✅ Zoom affects the frame YOLO receives (not just UI scaling)
-   - ❌ Inference resolution (640) — hardcoded, not configurable
-   - ❌ ROI cropping — not supported
-4. **Guided Setup Flow redesigned** — 8-step flow with auto-zoom integrated (see below). Previous 7-step flow (LOCKED 2026-04-06) superseded. Text-based instructions at bottom center (not voice-first — user is at the tripod during setup). Voice only used for auto-zoom feedback (Step 3).
-5. **No code changes this session** — discussion and design only.
+### What Was Done This Session (2026-04-15)
+1. **Session lock in BallIdentifier**  `_sessionLocked` flag with `activateSessionLock()` / `deactivateSessionLock()`. When active, Priority 2 (single moving track) and Priority 3 (nearest non-static) are skipped. Activated when KickDetector enters `active` state, deactivated on HIT/MISS/LOST decision.
+2. **Protected track in ByteTrackTracker**  `_protectedTrackId` with `setProtectedTrackId()`. Protected track survives 60 frames (`protectedMaxLostFrames`) instead of default 30 (`maxLostFrames`). Covers typical ball flight duration.
+3. **Bbox area ratio check on Mahalanobis rescue**  Before accepting a Mahalanobis rescue match, validates `detArea / trackArea` is between 0.5 and 2.0. Prevents track hijacking to player head/poster (which had ratios of 3.8x-9x in logs). **Currently too aggressive  blocks real ball tracking during fast kicks.**
+4. **Trail suppression during idle**  TrailOverlay receives empty list when `_kickDetector.state == KickState.idle`. Trail dots only shown during confirming/active/refractory. Eliminates false positive visual noise between kicks.
+5. **Wiring in LiveObjectDetectionScreen**  Session lock activates after `_kickDetector.processFrame()` when `isKickActive && !isSessionLocked`. Deactivates in both ACCEPT (after `onKickComplete()`) and REJECT (after `forceReset()`) paths.
 
-### Previous Session (2026-04-13)
-1. **Pre-ByteTrack AR filter** — `ar > 1.8` in `_toDetections()`. Monitor-tested, reduced false positive trail dots. Still in place.
-2. **Debug bbox overlay disabled** — `_debugBboxOverlay = false`.
-3. **Mahalanobis rescue validation** — implemented and reverted. ISSUE-026 still open.
+### Monitor+Video Test Results (2026-04-15)
+**Test with session lock + area ratio (5 kicks):**
+- 3/5 kicks detected correctly with HIT decisions
+- 2/5 kicks completely silent (no tracking, no dots, no decision)
+- 0 false positive dots (previously the main problem)
 
-### Failed Approach (2026-04-13, earlier session) — DO NOT REPEAT
-Implemented a 2-layer filter: (1) DetectionFilter pre-ByteTrack (AR + size hard reject), (2) TrackQualityGate post-ByteTrack (init delay + rolling median), (3) Mahalanobis rescue validation (size ratio + velocity direction). Device testing showed:
-- **Init delay (4 frames) blocked BallIdentifier re-acquisition** — real ball stuck at [INIT] while BallIdentifier locked onto poster/head
-- **Track ID churn** (id:1 → id:15 in one session) — filters intermittently rejected real ball, destabilizing ByteTrack
-- **Player head (ar:0.9, c:0.98) passes ALL geometric filters** — fundamentally unfilterable with AR + size
-- **Poster locked as ball** (ar:0.8, c:0.99) — passed all filters, static flag hadn't triggered yet (needs 30 frames)
+**Silent kick #1 analysis:**
+- Ball kicked to zone 7. trackId=5 tracked with only Kalman predictions during flight (no real detections matched). ImpactDetector fired premature noResult before ball reached grid. Then trackId lost, 12 new ball-class tracks appeared but BallIdentifier couldn't acquire because it was stuck on dead trackId. Ball's bounce-back was detected as a new kick and announced HIT zone 1 (false positive decision from bounce-back).
 
-**Key lesson:** Any filter between ByteTrack and BallIdentifier that delays or blocks tracks risks breaking re-acquisition. The re-acquisition path is the most fragile part of the pipeline. Filters must NOT starve BallIdentifier of candidates.
+**Silent kick #2 analysis:**
+- After a legitimate HIT zone 1 decision, bounce-back triggered false kick detection on trackId=31. Session lock activated for bounce-back. trackId=31 quickly lost. Session lock STUCK ON (no decision made to release it). Ball placed for next kick, kicked  completely silent because session lock blocked all re-acquisition for 200+ frames.
+
+### Root Causes Identified
+1. **Area ratio check (2.0/0.5) too aggressive**  During fast kicks, Kalman predicted area diverges from reality (shrinks due to vw/vh velocity components). Real YOLO detections get blocked because ratio exceeds threshold. Example: Kalman predicted area=0.000220, real detection area ~0.001  ratio=4.5x, blocked.
+2. **Session lock has no safety timeout**  If locked track is lost and ImpactDetector never makes a decision (e.g., bounce-back triggered false kick, ball disappeared), the lock stays on forever. Need safety timeout or auto-release when locked track is removed from ByteTrack.
+3. **Bounce-back triggers false kick detection**  After a real kick hits the wall, the bounce-back is detected as a new kick by KickDetector, triggering session lock on the wrong track.
+
+### Previous Session (2026-04-14)
+1. Guided Setup Flow with Auto-Zoom design discussion
+2. Research on YOLO11n minimum pixel thresholds (~32px)
+3. Plugin API exploration: setZoomLevel() supported
+4. No code changes
+
+### Failed Approach (2026-04-13, earlier session)  DO NOT REPEAT
+2-layer filter (DetectionFilter + TrackQualityGate + Mahalanobis rescue validation). Init delay broke BallIdentifier re-acquisition. Player head (ar:0.9) unfilterable with geometry. Must implement ONE filter at a time.
 
 ### What Remains
-1. **Mahalanobis rescue hijacks ball identity (ISSUE-026)** — locked track jumps from real ball to false positives via Mahalanobis matching. Causes total tracking loss. Mahalanobis rescue validation (size ratio + velocity direction) was implemented and reverted this session — can be re-applied after AR filter is field-tested.
-2. **Player head false positives (ar:0.9, c:0.98)** — passes AR filter (within ball range). Unfilterable with geometry alone. Needs second-stage classifier or motion channel.
-3. **Track ID churn** — YOLO dual-class detections on same ball (Soccer ball + ball) create duplicate tracks. Cosmetic — doesn't affect BallIdentifier which follows locked track only. NMS dedup in `_toDetections()` would fix but is not a priority.
-
-### Monitor Test Results — Session 2 (2026-04-09, with calibration diagnostics + debug overlay)
-
-**Test 1 (tilt=green, aspectRatio=1.87, coverage=8.18%):**
-| Kick | Actual | directZone | WallPredictor | Correct? | Announced? |
-|------|--------|------------|---------------|----------|------------|
-| 1 | Zone 1 | Zone 1 | Zone 1 | ✅ | ❌ (kickState=idle, isStatic bug) |
-| 2 | Zone 1 | Zone 1 | Zone 1 | ✅ | ✅ |
-| 3 | Zone 7 | Zone 6 | Zone 7 | ❌ (off by 1) | ✅ |
-| 4 | Zone 6 | Zone 6 | Zone 6 | ✅ | ✅ |
-
-**Test 2 (tilt=yellow, aspectRatio=2.08, coverage=8.23%, grid 0.04 lower):**
-| Kick | Actual | directZone | WallPredictor | Correct? | Announced? |
-|------|--------|------------|---------------|----------|------------|
-| 1 | Zone 1 | Zone 1 | Zone 1 | ✅ | ✅ (premature) |
-| 2 | Zone 1 | — | — | — | ❌ (total tracking loss — identity corrupted by video player) |
-| 3 | Zone 1 | null | null | noResult | ❌ (directZone only on predicted frames) |
-| 4 | Zone 7 | Zone 1 | Zone 6 | ❌ | ✅ (premature, wrong zone) |
-
-### Monitor Test Results — Session 1 (2026-04-09, no diagnostics)
-
-| Kick | Actual | directZone | WallPredictor | Extrapolation |
-|------|--------|------------|---------------|---------------|
-| 1 | Zone 1 | null | — | — |
-| 2 | Zone 1 | null/1(pred) | 1 | 6 |
-| 3 | Zone 7 | 1 | 1 | 1 |
-| 4 | Zone 5 | 1 | 5 | 6 |
-| 5 | Zone 6 | 1 | 1 | 6 |
-
-### Video Test Results — Session 0 (2026-04-09, monitor playback on iPhone 12)
-
-| Kick | Actual | directZone correct? | WallPredicted | Decision (pre-fix) | Announced? |
-|------|--------|-------------------|---------------|----------|------------|
-| 1 | Zone 1 | Yes (1 frame) | Zone 1 | HIT zone 1 | Yes |
-| 2 | Zone 1 | Yes (3 frames) | null | reset (insufficient frames) | No |
-| 3 | Zone 7 | Yes (1 frame) | null | reset (insufficient frames) | No |
-| 4 | Zone 5 | Yes (1 frame) | Zone 5 | reset (insufficient frames) | No |
-| 5 | Zone 6 | Yes (1 frame) | Zone 6 | HIT zone 6 | Yes |
-
-**Key findings:**
-1. **directZone was correct 5/5 (100%)** — the ball was tracked into the correct zone every single time via `pointToZone()` on the actual camera position.
-2. **WallPlanePredictor also correct when it fired (2/2)** — but only fired on 2 of 5 kicks.
-3. **3/5 kicks blocked by `trackingFrames` counter** — ImpactDetector counted only 1-2 frames despite ByteTrack tracking 5-9 frames. Root cause: ImpactDetector's frame counter increments only during `DetectionPhase.tracking`, but ByteTrack tracks frames before ImpactDetector enters tracking.
-4. **3/5 kicks KickDetector stayed `confirming`** — never reached `active` (needs 3 sustained high-speed frames).
-5. **No false announcements** — the one phantom decision between kicks had `directZone=null`, so the new logic naturally filters it out.
-
-### Field Test Results (2026-04-06, iPhone 12) — Post-Reconnection
-
-**Phase 1 (plain brick wall, no circles, ~11m):**
-| Kick | Actual | Predicted | Result |
-|------|--------|-----------|--------|
-| 1 | Zone 1 | Zone 1 | ✅ Correct (announced before impact) |
-| 2 | Zone 1 | — | ❌ Missed — KickDetector stayed `idle`, result rejected |
-| 3 | Zone 7 | Zone 6 | ❌ One row down (announced before impact) |
-| 4 | Zone 5 | Zone 2 | ❌ One row down (announced before impact) |
-
-**Phase 2 (Flare Player banner with circles, ~11m):**
-| Kick | Actual | Predicted | Result |
-|------|--------|-----------|--------|
-| 1 | Zone 7 | Zone 6 | ❌ One row down (announced before impact) |
-| 2 | Zone 9 | Zone 6 | ❌ Wrong column + wrong row; circle dot on zone 9 |
-| 3 | Zone 8 | Zone 6 | ❌ Wrong column + wrong row; false trail from zone 5 circle |
-
-### Field Test Results (2026-04-04, iPhone 12)
-- **Phase 1 (tripod waist height ~0.8m, 11m from target):** 7/18 correct (38.9%), zone 6 bias (11/18 reported zone 6, 0 were actually zone 6)
-- **Phase 2 (tripod chest height ~1.25m, 11m from target):** 1/9 correct (11.1%), zone 1/2 bias
-- **Both phases:** 23/27 kicks announced "too soon" — before ball reached the target
-
-### Android Test Device Change
-Android test device changed from **Galaxy A32 (SM-A325F)** to **Realme 9 Pro+ (Snapdragon 695)**.
+1. **Area ratio check needs relaxation or different comparison basis**  Compare against last measured area (not Kalman predicted) or increase threshold to 3.0-3.5. Hijack cases were 3.8x-9x so there's room.
+2. **Session lock needs safety timeout**  Auto-deactivate if locked track is lost for N frames without a decision. Prevents permanent lock from bounce-back false kicks.
+3. **Bounce-back false kick detection**  KickDetector sees bounce-back motion as a new kick. Consider refractory period or direction check to reject bounce-backs.
+4. **Mahalanobis rescue identity hijacking (ISSUE-026)**  Partially addressed by area ratio check. Needs further tuning.
+5. **Player head false positives (ar:0.9, c:0.98)**  Passes AR filter. Unfilterable with geometry alone. Partially addressed by session lock (dots hidden during idle) but track corruption still occurs.
 
 ## What Is Fully Working
-- **YOLO live camera detection (iOS)** — `YOLOView` renders correctly on iPhone 12 with ball trail, "Ball lost" badge, and all overlays
-- **YOLO live camera detection (Android)** — `YOLOView` renders on Realme 9 Pro+ with `onResult` confirmed firing. Trail dots, connecting lines, and "Ball lost" badge all visually confirmed working.
-- **Ball tracking throughout flight** — YOLO + ByteTrack tracks the ball during flight. Track identity subject to corruption (ISSUE-026).
-- **Pre-ByteTrack AR filter (2026-04-13)** — Rejects YOLO detections with aspect ratio > 1.8 in `_toDetections()` before they enter ByteTrack. Eliminates torso/limb false positives (AR 2.4-3.6). Device-tested on monitor — reduced false positive trail dots.
-- **Debug bounding box overlay (2026-04-09)** — Visual debug overlay showing all ball-class detections with colored bboxes (green=locked, yellow=candidate, red=lost), trackId, bbox WxH, aspect ratio, confidence, isStatic. Toggle: `_debugBboxOverlay` const. **Currently disabled** (`false`).
-- **Calibration geometry diagnostics (2026-04-09)** — Logs 15+ geometric parameters at every calibration and pipeline start for cross-session comparison.
-- **Enhanced BallIdentifier logging (2026-04-09)** — Re-acquisition events log old→new trackId, bbox shape, reason. Lost events show all candidates with full info.
-- **Backend switching infrastructure** — `DETECTOR_BACKEND` env var system preserved; currently only `yolo` is implemented
-- **Landscape orientation** — YOLO mode forces landscape in `initState`, restores portrait+landscape on `dispose`
-- **Home screen** — Minimal launch screen with soccer icon, title, subtitle, and "Start Detection" button
-- **Navigation** — Two routes: homeScreen (`/`) and cameraScreen (`/camera/`)
-- **Ball trail (Phase 7)** — `BallTracker` service with bounded 1.5s ListQueue, occlusion sentinels, 30-frame auto-reset, min-distance dedup. `TrailOverlay` CustomPainter with fading orange dots, connecting lines, occlusion gap skipping, FILL_CENTER crop correction via `YoloCoordUtils`.
-- **Camera aspect ratio (4:3)** — Corrected from 16:9 to 4:3. Visually correct on both platforms.
-- **"Ball lost" badge (Phase 8)** — Device-verified on iPhone 12 and visually confirmed on Realme 9 Pro+.
-- **Android coordinate correction** — MethodChannel rotation polling + `(1-x, 1-y)` flip for rotation=3.
-- **aaptOptions fix** — `aaptOptions { noCompress 'tflite' }` in `build.gradle` resolved Android `onResult` silence.
-- **Widget test** — 3 `DetectorConfig` unit tests passing.
-- **Camera permission handling** — `permission_handler: ^11.3.1` added. `_requestCameraPermission()` in `initState` explicitly requests camera permission before rendering `YOLOView`. iOS Podfile configured with `PERMISSION_CAMERA=1` macro.
-- **AppBar removed** — Scaffold no longer has `appBar`. Camera preview fills full screen height in landscape (~56px reclaimed).
-- **Back button badge** — Circular back arrow icon at top-left. Works during all calibration stages.
-- **Draggable calibration corners with finger occlusion fix** — Hollow green ring markers, 30px vertical offset cursor during drag, full-width/height crosshair lines. Device-verified on iPhone 12 and Realme 9 Pro+.
-- **Pipeline gating (`_pipelineLive`)** — Detection pipeline only activates after full calibration + reference ball confirm. Device-verified on iPhone 12 and Realme 9 Pro+.
-- **Impact detection (Phase 3)** — `ImpactDetector` state machine (Ready -> Tracking -> Result -> Ready). Decision based on last observed `directZone` (ball's actual position in grid). Edge exit → MISS. No directZone → noResult. 150 unit tests (was 94, updated for new decision logic).
-- **tickResultTimeout() fix (2026-03-23)** — `ImpactDetector.tickResultTimeout()` called every frame outside the kick gate, so the result display 3-second timeout always clears regardless of kick state. Fixes stuck overlay bug (Bug 1).
-- **Audio feedback (Phase 4)** — `AudioService` singleton with lazy `AudioPlayer`. HIT audio: "You hit N!" + crowd cheer (~4.7s). MISS buzzer. Device-verified on iPhone 12, Galaxy A32, and Realme 9 Pro+.
-- **Depth estimation (Phase 5)** — Reference Ball Capture + depth ratio trust qualifier. Depth-verified zone stored for diagnostics but no longer used for decisions (directZone is primary).
-- **KickDetector service (2026-03-23)** — `lib/services/kick_detector.dart`. 4-state machine: idle → confirming → active → refractory. Integrated into live screen as **result gate**: accepts results when kick state is `confirming` OR `active` (was `active` only, loosened 2026-04-09). `onKickComplete()` also transitions from `confirming` to refractory.
-- **DiagnosticLogger service (2026-03-23)** — `lib/services/diagnostic_logger.dart`. Per-frame and per-decision CSV logging. Writes to app documents directory. CSV includes `kick_confirmed` and `kick_state` columns. Share Log button exports CSV via `Share.shareXFiles`.
-- **IMPACT DECISION diagnostic block (2026-04-09)** — Now includes `lastDirectZone`, `kickState`, and `ballConfidence` fields. No more blind spots in decision analysis.
-- **`TrackedObject.confidence` field (2026-04-09)** — YOLO confidence surfaced from ByteTrack internal `_STrack` to public `TrackedObject` class.
-- **Camera alignment aids (2026-04-08)** — Center crosshair, tilt indicator, shape validation in `CalibrationOverlay`. Device-verified on iPhone 12.
-- **Large result overlay temporarily commented out (2026-04-08)** — Center-screen zone number / MISS overlay disabled for testing phase. Audio + bottom-right badge still announce results.
-- **Code snapshots directory (2026-04-08)** — `memory-bank/snapshots/` for pre-change backups of source files before risky edits.
-- **Two-way isStatic classification (2026-04-13, ISSUE-027 FIXED)** — ByteTrack `_STrack.evaluateStatic()` now uses sliding window displacement (last 30 frames) instead of lifetime cumulative accumulator. Flag transitions both ways: `false→true` when ball stops, `true→false` when ball moves. Inspired by Frigate NVR's production static object detection. Device-verified on iPhone 12.
-- **Code quality** — `flutter analyze` 0 errors, 0 warnings, 81 infos. `flutter test` 176/176.
-- **Evaluation documentation** — `docs/` and `result/android/` contain evidence from both platforms.
+- YOLO11n live camera detection on iOS (iPhone 12) and Android (Realme 9 Pro+)
+- ByteTrack multi-object tracker with 8-state Kalman filter
+- BallIdentifier with 3-priority identification and session lock
+- Ball trail overlay with kick-state-based visibility (dots only during kicks)
+- "Ball lost" badge after 3 consecutive missed frames
+- 4-corner calibration with DLT homography transform
+- 9-zone target mapping via TargetZoneMapper
+- ImpactDetector (Phase 3 state machine) with directZone decision
+- KickDetector (4-state gate: idle/confirming/active/refractory)
+- Audio feedback (zone callouts + miss buzzer)
+- DiagnosticLogger CSV export with Share Log
+- Pre-ByteTrack AR > 1.8 filter (rejects torso/limb false positives)
+- Session lock prevents re-acquisition during active kicks
+- Protected track extends ByteTrack survival for locked ball
+- Landscape orientation lock with proper restore
+- Camera permission handling
+- Rotate-to-landscape overlay with accelerometer
 
 ## What Is Partially Done / In Progress
-- **Pre-ByteTrack AR filter — IMPLEMENTED, NEEDS FIELD TEST** — Rejects AR > 1.8 in `_toDetections()`. Monitor-tested, reduced false positive dots on player. Needs real field test to confirm.
-- **directZone decision logic — PROVEN UNRELIABLE** — Reports first zone entered (always zone 1 for upward kicks), not impact zone. 0/5 to 3/4 correct depending on calibration. Needs fundamental rethink.
-- **Mahalanobis rescue identity hijacking (ISSUE-026, CRITICAL)** — Locked track jumps to false positives. Causes total tracking loss. Fix code was written/tested/reverted this session — ready to re-apply after AR filter field test.
-- **~~isStatic flag never clears (ISSUE-027)~~** — ✅ FIXED (2026-04-13). Sliding window displacement replaces lifetime accumulator. Device-verified.
-- **`tennis-ball` accepted at priority 2** — Diagnostic concession from Phase 9; unnecessary but harmless.
-- **Ball identifier re-acquisition** — Picks up player walking, target circles on bounce-back. Needs conservative re-acquisition during idle state.
-- **False trail dots on non-ball objects — PARTIALLY MITIGATED** — AR filter reduces torso false positives. Player head (ar:0.9) still passes. Root cause is BallIdentifier track identity, not trail timing.
-- **Phantom impact decisions during idle (log pollution)** — ImpactDetector fires decisions during kick=idle. NOT announced (KickDetector result gate blocks). Diagnostic log noise only.
-- **Extrapolation overshoot in trail dots** — Video test showed trail dots extending past the grid (zone 8 and beyond) on kicks aimed at zone 5 or 7. The Kalman prediction keeps projecting linearly after the real ball stops. Trail dots are drawn from Kalman predictions, not just real detections.
-- **Track ID churn (cosmetic)** — YOLO fires two detections per ball (Soccer ball + ball classes), each creating a separate ByteTrack track. Does NOT affect functionality — BallIdentifier follows locked track only. NMS dedup would fix if desired.
+- **Bbox area ratio check on Mahalanobis rescue**  Implemented at 2.0/0.5 threshold. Eliminates false positives but blocks legitimate tracking during fast kicks. Needs threshold adjustment or comparison basis change.
+- **Session lock safety timeout**  Not yet implemented. Lock can get stuck permanently if no decision fires.
+- **directZone accuracy**  Reports first zone entered, not impact zone. 0/5 to 5/5 correct depending on calibration.
+- **Bounce-back false detection**  Ball rebound triggers second decision cycle. Not addressed.
 
-## Known Critical Issue: Target Circle False Positives (ISSUE-022)
-**Status: CONFIRMED — physical fix required. Remove circles from target fabric.**
-
-ByteTrack Round 3 (Mahalanobis restricted to locked ball) eliminates circle false positives during active ball tracking. However, circles still cause problems via:
-- Ball identifier re-acquisition picks up circle detections after ball is lost
-- Circle dot observations pollute trajectory data during kicks
-
-**Decision: Remove circles from physical target.** The zones are defined by calibration corners + homography, not by physical circle markings.
-
-## Known Gaps (Minor)
-- **iOS camera description** — `Info.plist` placeholder (`"your usage description here"`) on lines 30 and 32. Must update before external demo.
-- **No version control** — Git may be initialized as local safety net (developer considering). Project has no remote.
-- **WallPlanePredictor/TrajectoryExtrapolator still in codebase** — No longer used for decisions but code remains. Can be cleaned up in future refactor. WallPlanePredictor still runs and logs `lastWallPredictedZone` for diagnostic comparison.
-
----
-
-## NEXT FEATURE: Target Zone Impact Detection
-
-### Feature Summary
-A numbered target sheet (1760mm x 1120mm) with a 3x3 grid of zones (1-9) is attached to a goal post. After a ball is kicked, the app detects which zone was hit and calls out the number.
-
-### Target Zone Layout (hardcoded in app)
-```
-Top row (L->R):    7, 8, 9
-Middle row (L->R): 6, 5, 4
-Bottom row (L->R): 1, 2, 3
-```
-Each zone is approximately 587mm x 373mm.
-
-### Physical Target Sheet
-- Dimensions: 1760mm wide x 1120mm tall
-- Black background with red LED-ringed circles and gold numbers — **THE CIRCLES CAUSE YOLO FALSE POSITIVES**
-- Mounted on solid green metal fence (ball cannot pass through)
-- Banner material, not rigid — shows wrinkles and folds
-
-### Implementation Phases
-| Phase | What it delivers | Status |
-|---|---|---|
-| Phase 1 | Calibration mode -- tap 4 corners, green grid overlay | ✅ COMPLETE |
-| Phase 2 | Kalman filter + trajectory tracking | ✅ COMPLETE |
-| Phase 3 | Impact detection + zone mapping + result display | ✅ COMPLETE |
-| Phase 4 | Audio feedback -- number callouts + miss buzzer | ✅ COMPLETE |
-| Phase 5 | Depth estimation (ball size tracking) to filter false impacts | ✅ COMPLETE (trust qualifier) |
-| KickDetector | Kick gate to prevent false triggers from non-kick movement | ✅ COMPLETE |
-| DiagnosticLogger | Per-frame/per-decision CSV logging for field analysis | ✅ COMPLETE |
-| **directZone decision** | **Use ball's actual grid position instead of prediction** | **✅ IMPLEMENTED — PENDING FIELD TEST** |
-| **FALSE POSITIVE FIX** | **Remove circles from physical target fabric** | **🟡 PHYSICAL CHANGE NEEDED** |
-| **Guided Setup Flow** | **Voice-guided camera positioning with auto-lock (7-step flow)** | **🔴 NEXT — #1 FEATURE** |
-
-### User Experience Flow (REVISED 2026-04-14 — supersedes 2026-04-06 version)
-
-**Physical setup:** Tripod + phone is behind the kicking spot, facing the target (~10-15m to target). Kicking spot is ~3-5m in front of the tripod. User stands at the tripod for all setup steps, then walks forward to the kicking spot and never returns to the phone.
-
-**Step 0: App launch**
-User opens app → Home screen → Taps "Start Detection" → Camera preview opens → Rotate-to-landscape overlay → User rotates to landscape → Overlay disappears.
-
-**Step 1: Setup instruction overlay**
-Screen shows overlay image in landscape illustrating correct setup (tripod behind kicking spot, facing target).
-Text at bottom center: *"Place your phone on the tripod, behind the kicking spot, facing the target as per the above overlay."*
-User taps Next.
-
-**Step 2: Quick target scan (NEW)**
-Text at bottom center: *"Tap anywhere on the target in the frame."*
-User taps roughly on the target area. Taps Next.
-Purpose: gives the app a rough sense of target location and size for auto-zoom calculation.
-
-**Step 3: Auto-zoom (NEW — no user action)**
-Voice: *"Adjusting zoom for best detection..."*
-App calculates optimal zoom from rough target position/size.
-View zooms in. Voice: *"Zoom set."*
-Automatically moves to Step 4.
-
-**Step 4: Tap 4 corners**
-Text at bottom center: *"Tap corner 1 of 4: Top-Left"* (existing behavior)
-User taps TL, TR, BR, BL on the zoomed view. Green grid appears. Corners are draggable for fine-tuning.
-User taps Next when satisfied with corner placement.
-
-**Step 5: Position quality validation**
-App checks from the 4 corners: target coverage, centering, angle, stability.
-Color-coded border: Red → Yellow → Green.
-One instruction at a time via text: *"Move camera a little left"*, *"Straighten camera"*, etc.
-Each criterion shows a checkmark when passed.
-All criteria green for 1+ second → haptic vibration → overlay: **"Position Locked"** → auto-moves to Step 6.
-If user can't pass: adjust tripod, go back to Step 4 to re-tap corners.
-
-**Step 6: Reference ball capture (existing behavior)**
-Text at bottom center: *"Place ball on target — point camera at ball"*
-Ball detected → text: *"Ball detected — tap Confirm"*
-Red bounding box. User taps Confirm.
-App validates ball size is sufficient for reliable detection.
-
-**Step 7: All set — user walks away**
-Voice: *"All set. Walk to the kicking spot and start kicking!"*
-User walks ~3-5m forward to the kicking spot.
-
-**Step 8: Live detection (existing behavior)**
-Text at bottom-right: *"Ready — waiting for kick"*
-User kicks → zone result displayed as text at bottom-right + audio announcement.
-User stays at the kicking spot (~3-5m in front of tripod, facing target). All feedback is audio. User never returns to the phone.
-
-**Design principles:**
-- Text-based during setup (user is at the tripod, can see screen)
-- Voice used for auto-zoom feedback and live detection results (user facing away from phone after Step 7)
-- One instruction at a time: don't overwhelm with all criteria simultaneously
-- Color-coded feedback: universally understood, no reading needed
-- Auto-confirmation for position lock: no manual "I'm positioned right" tap
-- Auto-zoom: compensates for distance, user doesn't need to find the "perfect" tripod position
-
-**Position quality checks (all derived from 4 corner taps, no complex math):**
-| Check | Measurement | Ideal Range |
-|-------|-------------|-------------|
-| Distance | Target coverage after zoom | TBD (needs validation) |
-| Centering | Centroid X vs frame center | Within ~10% |
-| Height | Centroid Y vs frame center | Within ~15% |
-| Angle | Top edge ≈ bottom edge length | Within ~15% |
-| Stability | Corner positions stable | 0.5s no movement |
-
-**Open design questions (2026-04-14):**
-1. How does a single tap in Step 2 give enough info for zoom calculation? May need two taps (opposite corners) instead.
-2. What target coverage % to aim for after zoom? Need to derive from 32px YOLO threshold.
-3. Position validation thresholds — are the ideal ranges still correct?
-
----
-
-## Key Decisions (Existing)
-
-### Key Decision: Camera Aspect Ratio is 4:3
-**Decision date:** 2026-02-23
-**Rationale:** `ultralytics_yolo` uses `.photo` session preset on iOS (4032x3024). 16:9 caused ~10% Y-offset.
-
-### Key Decision: SSD/TFLite Path Fully Removed
-**Decision date:** 2026-03-05
-
-### Key Decision: Android Coordinate Correction via MethodChannel
-**Decision date:** 2026-02-25
-
-### Key Decision: aaptOptions Root Cause Fix
-**Decision date:** 2026-02-25
-
-### Key Decision: Android Performance Accepted as-is
-**Decision date:** 2026-03-05
-
-### Key Decision: No Git / No GitHub
-**Decision date:** 2026-03-05
-
-### Key Decision: Unsplash/API Layer Fully Removed
-**Decision date:** 2026-03-09
-
-### Key Decision: Target Zone Detection Approach -- Manual Calibration + Multi-Signal Impact Detection
-**Decision date:** 2026-03-09
-
-### Key Decision: Kick-State Gate on ImpactDetector — REVERTED (2026-04-08)
-**Decision date:** 2026-04-08
-**Rationale:** Attempted to gate ImpactDetector and WallPredictor behind KickDetector state to prevent phantom decisions during idle. Broke grounded kick detection — KickDetector's jerk threshold doesn't reliably trigger for low-velocity shots. Fully reverted to unconditional per-frame processing. KickDetector now only gates result acceptance (audio announcement), not pipeline input.
-
-### Key Decision: directZone as Primary Decision Signal (2026-04-09)
-**Decision date:** 2026-04-09
-**Rationale:** Video test analysis showed directZone (ball's actual position mapped through homography) was correct 5/5 times. WallPlanePredictor, depth-verified zone, and extrapolation all had accuracy and reliability problems. directZone is the simplest and most accurate signal — no prediction, no extrapolation, just where the ball actually is when it's inside the grid. Decision cascade replaced with: edge exit → last directZone → noResult. If the ball never entered the grid, no decision is made.
-
-### Key Decision: Auto-Zoom via Plugin API for Detection Reliability (2026-04-14)
-**Decision date:** 2026-04-14
-**Rationale:** Developer's controlled testing revealed that camera distance and lateral offset are the primary drivers of detection accuracy — more impactful than any software filter. At the "right" setup geometry, even unfilterable false positives (player head AR ~0.9) disappear. Root cause: ball pixel size at YOLO's 640 inference resolution. Stationary ball ≈ 29px (borderline), ball at target ≈ 13px (well below 32px threshold). `ultralytics_yolo` plugin exposes `YOLOViewController.setZoomLevel()` which applies real camera digital zoom before YOLO inference. At 2.5× zoom, ball at target would be ~33px at inference — above the threshold. Auto-zoom calculated from calibration data (target coverage) replaces the need to find the "perfect" distance manually.
-
-### Key Decision: Guided Setup Flow Redesigned with Auto-Zoom (2026-04-14)
-**Decision date:** 2026-04-14
-**Rationale:** Previous 7-step flow (2026-04-06) superseded. New 8-step flow integrates auto-zoom between quick target scan and precise corner calibration. Key changes: (1) Quick target scan before corner taps to enable zoom calculation, (2) Auto-zoom sets camera zoom before precise calibration, (3) Corner taps happen on zoomed view — no re-calibration needed, (4) "Position Locked" overlay confirms setup completion, (5) Text-based instructions during setup (user is at tripod), voice only for auto-zoom feedback and live detection.
-
-### Key Decision: Accept `confirming` in Result Gate (2026-04-09)
-**Decision date:** 2026-04-09
-**Rationale:** KickDetector requires 3 sustained high-speed frames to reach `active`, but fast kicks often have fewer tracked frames. `confirming` already means a jerk spike was detected (explosive onset = real kick). Combined with directZone requirement (ball must have entered the grid), `confirming` is sufficient — false positives are filtered by requiring non-null directZone.
+## Known Gaps
+- iOS `NSCameraUsageDescription` has placeholder text
+- `tennis-ball` priority 2 in class filter (harmless)
+- Free Apple Dev cert expires every 7 days
+- Phantom impact decisions during kick=idle (log noise only, not announced)
 
 ## Model Files: Developer Machine Setup Required
-The YOLO model files are gitignored and must be manually placed:
-
-**Android setup:**
+**Android:**
 ```bash
 mkdir -p android/app/src/main/assets
 cp /path/to/yolo11n.tflite android/app/src/main/assets/
 ```
 
-**iOS setup:**
-1. Copy `yolo11n.mlpackage` into the `ios/` directory
+**iOS:**
+1. Copy `yolo11n.mlpackage` into `ios/` directory
 2. Open `ios/Runner.xcworkspace` in Xcode
-3. Confirm `yolo11n.mlpackage` is listed under Runner -> Build Phases -> Copy Bundle Resources
-   (Xcode reference already exists: `9883D8872F43899800AEC4E1`)
+3. Confirm model appears under Runner  Build Phases  Copy Bundle Resources
 
 ## Active Environment Variable
 ```bash
-# Run with YOLO (default -- only backend now)
 flutter run --dart-define=DETECTOR_BACKEND=yolo
 # or simply:
 flutter run
 ```
 
-## Immediate Next Steps — INCREMENTAL, ONE AT A TIME
-
-1. **Resolve open design questions for Guided Setup Flow + Auto-Zoom (2026-04-14)** — Three questions pending discussion before any code:
-   - Step 2 (quick target scan): single tap vs two-tap for zoom calculation
-   - Step 3 (auto-zoom): target coverage % after zoom
-   - Step 5 (position validation): threshold values
-
-2. **Implement Guided Setup Flow with Auto-Zoom** — 8-step flow as agreed. Key new components: setup instruction overlay (Step 1), quick target scan (Step 2), auto-zoom via `YOLOViewController.setZoomLevel()` (Step 3), position quality validation (Step 5), "Position Locked" overlay.
-
-3. **Field test AR filter (2026-04-13)** — AR > 1.8 filter is in place and monitor-tested. Needs field test.
-
-4. **Mahalanobis rescue validation (ISSUE-026)** — After AR filter is field-validated, re-apply size ratio + velocity direction checks inside `_greedyMatch()`.
-
-5. **Rethink zone determination** — directZone unreliable for upward kicks. Options: (a) WallPlanePredictor as primary, (b) delay decision until depthRatio ~1.0, (c) trajectory extrapolation.
-
-### Approaches Validated by Research (for reference)
-- **Proven in production:** AR filter, size filter, min track age, velocity consistency (Frigate NVR, Hawk-Eye, Norfair, OC-SORT, Roboflow)
-- **What DOESN'T work for us:** Post-ByteTrack init delay that blocks BallIdentifier re-acquisition. Any filter between ByteTrack output and BallIdentifier input must pass ALL tracks through — it can tag/score them but must not remove them from BallIdentifier's candidate pool.
-- **Player head (ar:0.9, c:0.98) is unfilterable with geometry alone** — needs either a second-stage crop classifier (MobileNetV2, ~5ms on iPhone 12) or motion channel validation (frame differencing, not available from ultralytics_yolo plugin).
-- **Track ID churn is cosmetic** — YOLO dual-class detections create duplicate tracks but BallIdentifier only follows the locked track. High track IDs (e.g., id:55) don't affect functionality.
+## Immediate Next Steps
+1. **Fix area ratio check**  Either compare detection area against last measured area (not Kalman predicted) to avoid drift, or relax threshold to 3.0-3.5 (hijack cases were 3.8x-9x). Test on device.
+2. **Add session lock safety timeout**  Auto-deactivate if locked track is lost for >30 frames without a decision. Prevents permanent lock from bounce-back.
+3. **Field test with fixes**  Verify both fixes together: zero false positive dots + no silent kicks.
+4. **Address bounce-back false kicks**  Consider direction check in KickDetector (ball moving away from goal = not a kick) or extended refractory period after decisions.

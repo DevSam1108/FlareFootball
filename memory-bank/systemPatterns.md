@@ -375,6 +375,24 @@ _yoloController.setZoomLevel(2.5);
 
 **Planned use:** Auto-calculated after quick target scan in Guided Setup Flow Step 3. Zoom level derived from target coverage in frame to ensure ball stays above YOLO's minimum detection threshold throughout its flight.
 
+### 16. Session Lock + Protected Track (Kick-Scoped Ball Identity Protection)
+
+**Problem:** Between kicks (idle period) and during track loss, BallIdentifier re-acquires to false positives (player head, poster, bounce-back ball) via Priority 2 (single moving track) or Priority 3 (nearest non-static). This creates false trail dots and corrupts pipeline state.
+
+**Pattern:** Three coordinated mechanisms:
+
+1. **Session lock (BallIdentifier):** `_sessionLocked` boolean. When active, Priority 2 and 3 are skipped — only Priority 1 (follow existing trackID) runs. Activated when `KickDetector.isKickActive`, deactivated on HIT/MISS/LOST decision.
+
+2. **Protected track (ByteTrackTracker):** `_protectedTrackId` gets `protectedMaxLostFrames = 60` survival instead of default `maxLostFrames = 30`. Keeps the locked ball track alive during flight so BallIdentifier doesn't need to re-acquire.
+
+3. **Trail suppression (TrailOverlay):** Receives empty trail when `kickState == idle`. Dots only visible during confirming/active/refractory. Eliminates visual noise without affecting pipeline data collection.
+
+**Wiring (LiveObjectDetectionScreen):**
+- Activate: after `_kickDetector.processFrame()` when `isKickActive && !isSessionLocked`
+- Deactivate: in ACCEPT path (after `onKickComplete()`) and REJECT path (after `forceReset()`)
+
+**Known issues (2026-04-15):** Session lock has no safety timeout (ISSUE-030). Bbox area ratio check on Mahalanobis rescue (2.0/0.5 threshold) too aggressive for fast kicks (ISSUE-029).
+
 ---
 
 ## Key File Map

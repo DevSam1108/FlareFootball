@@ -4,6 +4,40 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 ---
 
+## ISSUE-030: Session Lock Stuck ON After Bounce-Back False Kick
+
+**Date:** 2026-04-15
+**Platform:** iOS (iPhone 12, monitor+video test)
+**Symptom:** After a legitimate HIT decision, ball bounces back from wall. KickDetector detects bounce-back motion as a new kick, activating session lock on the bounce-back trackID. Bounce-back ball quickly lost. Session lock remains ON permanently (200+ frames of "skipping re-acquisition"). Next real kick is completely silent — no tracking, no dots, no decision.
+
+**Root Cause:** Session lock only deactivates when ImpactDetector makes a decision. If the locked track (bounce-back ball) disappears before ImpactDetector can fire, no decision is ever made, and the lock stays on forever.
+
+**Evidence:** Log shows `DIAG-BALLID: locked trackId=31 LOST but session lock ACTIVE — skipping re-acquisition` repeated 200+ times across frames 2070-2310.
+
+**Fix:** Not yet implemented. Needs safety timeout — auto-deactivate session lock if locked track is lost for >N frames without a decision.
+
+**Status:** 🔴 OPEN
+
+---
+
+## ISSUE-029: Bbox Area Ratio Check Too Aggressive — Blocks Legitimate Fast Kick Tracking
+
+**Date:** 2026-04-15
+**Platform:** iOS (iPhone 12, monitor+video test)
+**Symptom:** During fast kicks, ball tracking goes silent after 2-3 frames. Only Kalman predictions, no real YOLO detections matched. Ball flies to target untracked, no decision made.
+
+**Root Cause:** The area ratio check (2.0/0.5 threshold) on Mahalanobis rescue compares detection area against Kalman PREDICTED area. During fast flight, Kalman's predicted bbox shrinks rapidly due to vw/vh velocity components (ball appears smaller as it approaches wall). After a few prediction-only frames, predicted area diverges so far that real YOLO detections get rejected. Example: Kalman predicted area = 0.000220, real detection area = 0.001000, ratio = 4.5x → blocked.
+
+**Evidence:** Log shows 5 consecutive frames with identical velocity (Kalman predictions, no matched detections) during confirmed ball flight. Ball visibly hit zone 7 but app showed no tracking.
+
+**Fix options:**
+1. Compare against last measured area instead of Kalman predicted area
+2. Relax threshold to 3.0-3.5 (hijack cases were 3.8x-9x, so room exists)
+
+**Status:** 🔴 OPEN — area ratio check needs tuning before next field test.
+
+---
+
 ## ISSUE-028: 2-Layer False Positive Filter Broke Ball Re-acquisition (REVERTED)
 
 **Date:** 2026-04-13

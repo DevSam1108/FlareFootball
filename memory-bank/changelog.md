@@ -2,6 +2,29 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## Session Lock + Protected Track + Trail Suppression + Mahalanobis Area Ratio (2026-04-15)
+
+### Summary
+Implemented manager's suggestions to eliminate false positive trail dots. Added session lock in BallIdentifier (blocks re-acquisition during kicks), protected track in ByteTrackTracker (60-frame survival for locked ball), bbox area ratio check on Mahalanobis rescue (rejects size-mismatched candidates >2x or <0.5x), and trail suppression during kick=idle. Monitor+video testing confirmed zero false positive dots but revealed 2/5 kicks going silent due to area ratio check being too aggressive during fast flight. Root cause: Kalman predicted area diverges during pure predictions, blocking legitimate rescues.
+
+### Modified Files
+- **`lib/services/ball_identifier.dart`** — Added `_sessionLocked` flag, `activateSessionLock()`, `deactivateSessionLock()`, `isSessionLocked` getter. Priority 2 and 3 wrapped with `!_sessionLocked` guard. New log message for locked re-acquisition skip. Reset clears lock.
+- **`lib/services/bytetrack_tracker.dart`** — Added `protectedMaxLostFrames = 60`, `_protectedTrackId`, `setProtectedTrackId()`, `_effectiveMaxLost()`. Track removal uses `_effectiveMaxLost(t)` instead of `maxLostFrames`. Added bbox area ratio check (4 lines) before Mahalanobis rescue acceptance. Reset clears protected ID.
+- **`lib/screens/live_object_detection/live_object_detection_screen.dart`** — Session lock activation after `_kickDetector.processFrame()`. Deactivation in both ACCEPT and REJECT decision paths. Trail visibility gated on `_kickDetector.state != KickState.idle`.
+
+### Verification
+```
+$ flutter analyze -- 0 errors, 0 warnings, 84 infos
+$ flutter test -- 176/176 passing
+```
+
+### Monitor Test Results
+- 0 false positive dots (previously the main problem) ✅
+- 2/5 kicks silent (area ratio too aggressive) ❌
+- Session lock stuck permanently on bounce-back false kicks ❌
+
+---
+
 ## Pre-ByteTrack AR Filter for False Positive Reduction (2026-04-13)
 
 ### Summary
