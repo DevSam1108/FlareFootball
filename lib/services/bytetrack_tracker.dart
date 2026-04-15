@@ -573,6 +573,13 @@ class ByteTrackTracker {
     this.staticMaxDisplacement = 0.02,
   });
 
+  /// Frames a protected (locked ball) track survives before removal.
+  /// Double the default [maxLostFrames] to cover typical ball flights.
+  static const int protectedMaxLostFrames = 60;
+
+  /// Track ID that gets extended survival time. Set via [setProtectedTrackId].
+  int? _protectedTrackId;
+
   final List<_STrack> _trackedTracks = [];
   final List<_STrack> _lostTracks = [];
   List<TrackedObject> _lastPublicSnapshot = const [];
@@ -714,7 +721,7 @@ class ByteTrackTracker {
     for (final t in _lostTracks) {
       if (t.state == TrackState.lost &&
           !matchedLostIdx.contains(_lostTracks.indexOf(t))) {
-        if (t.consecutiveLostFrames > maxLostFrames) {
+        if (t.consecutiveLostFrames > _effectiveMaxLost(t)) {
           t.state = TrackState.removed;
         } else {
           nextLost.add(t);
@@ -722,7 +729,7 @@ class ByteTrackTracker {
       }
     }
     for (final t in stillUnmatched) {
-      if (t.consecutiveLostFrames > maxLostFrames) {
+      if (t.consecutiveLostFrames > _effectiveMaxLost(t)) {
         t.state = TrackState.removed;
       } else {
         nextLost.add(t);
@@ -758,11 +765,27 @@ class ByteTrackTracker {
     return _lastPublicSnapshot;
   }
 
+  /// Set the protected track ID. This track gets [protectedMaxLostFrames]
+  /// survival time instead of [maxLostFrames]. Pass null to clear protection.
+  void setProtectedTrackId(int? id) {
+    _protectedTrackId = id;
+  }
+
+  /// Returns the effective max lost frames for a track — extended for the
+  /// protected track, default for all others.
+  int _effectiveMaxLost(_STrack t) {
+    if (_protectedTrackId != null && t.id == _protectedTrackId) {
+      return protectedMaxLostFrames;
+    }
+    return maxLostFrames;
+  }
+
   /// Reset all tracks and ID counter.
   void reset() {
     _trackedTracks.clear();
     _lostTracks.clear();
     _lastPublicSnapshot = const [];
+    _protectedTrackId = null;
     _STrack._nextId = 1;
   }
 
@@ -825,6 +848,14 @@ class ByteTrackTracker {
 
       for (var di = 0; di < dets.length; di++) {
         if (matchedDetIdx.contains(di)) continue;
+
+        // Bbox area ratio check — reject if detection size is too different
+        // from the track's predicted size. Prevents Mahalanobis rescue from
+        // hijacking the ball track to a player head or other false positive.
+        final trackArea = tracks[ti].kalman.width.abs() * tracks[ti].kalman.height.abs();
+        final detArea = dets[di].bbox.width * dets[di].bbox.height;
+        final areaRatio = trackArea > 0 ? detArea / trackArea : 0.0;
+        if (areaRatio > 2.0 || areaRatio < 0.5) continue;
 
         final mahalSq = tracks[ti].kalman.mahalanobisDistSq(dets[di].bbox);
         if (mahalSq != null && mahalSq <= _chi2Threshold95) {

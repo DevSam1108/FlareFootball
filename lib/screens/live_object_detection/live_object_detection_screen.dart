@@ -66,6 +66,14 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   // ---------------------------------------------------------------------------
   static const _debugBboxOverlay = false;
 
+  // ---------------------------------------------------------------------------
+  // Debug: zoom test. Set to 0.0 to disable, or a value like 2.0 to test.
+  // ---------------------------------------------------------------------------
+  // static const _testZoomLevel = 0.0;
+  //
+  // /// Key for YOLOView — used to access camera features like zoom.
+  // final _yoloViewKey = GlobalKey();
+
   /// All ball-class tracks from the latest ByteTrack frame (for debug overlay).
   List<TrackedObject> _debugBallClassTracks = const [];
 
@@ -173,6 +181,16 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     if (!mounted) return;
     if (status.isGranted) {
       setState(() => _cameraReady = true);
+      // // Debug: apply test zoom after camera is ready.
+      // if (_testZoomLevel > 0.0) {
+      //   Future.delayed(const Duration(milliseconds: 500), () {
+      //     if (!mounted) return;
+      //     final state = _yoloViewKey.currentState;
+      //     if (state != null) {
+      //       (state as dynamic).setZoomLevel(_testZoomLevel);
+      //     }
+      //   });
+      // }
     } else {
       // Permission denied — show a message and pop back.
       ScaffoldMessenger.of(context).showSnackBar(
@@ -535,6 +553,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
         fit: StackFit.expand,
         children: [
           YOLOView(
+            // key: _yoloViewKey,
             modelPath: Platform.isIOS ? 'yolo11n' : 'yolo11n.tflite',
             task: YOLOTask.detect,
             // OVLY-03: Suppress native bounding box overlays so only
@@ -620,6 +639,15 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                         _impactDetector.phase == DetectionPhase.tracking,
                   );
 
+                  // 5b. Session lock: activate when kick starts to prevent
+                  // BallIdentifier from re-acquiring to false positives.
+                  if (_kickDetector.isKickActive &&
+                      !_ballId.isSessionLocked) {
+                    _ballId.activateSessionLock();
+                    _byteTracker.setProtectedTrackId(
+                        _ballId.currentBallTrackId);
+                  }
+
                   // 6. Trajectory prediction signals.
                   ExtrapolationResult? extrapolation;
                   if (rawPosition != null && velocity != null &&
@@ -682,6 +710,8 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                           .playImpactResult(_impactDetector.currentResult!);
                       _kickDetector.onKickComplete();
                       _wallPredictor?.reset();
+                      _ballId.deactivateSessionLock();
+                      _byteTracker.setProtectedTrackId(null);
 
                       // Log the impact decision.
                       final event = _impactDetector.currentResult!;
@@ -713,6 +743,8 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                       // REJECT: not a real kick → discard silently.
                       _impactDetector.forceReset();
                       _wallPredictor?.reset();
+                      _ballId.deactivateSessionLock();
+                      _byteTracker.setProtectedTrackId(null);
                     }
                   }
 
@@ -772,7 +804,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
               child: CustomPaint(
                 size: Size.infinite,
                 painter: TrailOverlay(
-                  trail: _ballId.trail,
+                  trail: _kickDetector.state == KickState.idle
+                      ? const []
+                      : _ballId.trail,
                   trailWindow: const Duration(seconds: 1, milliseconds: 500),
                 ),
               ),

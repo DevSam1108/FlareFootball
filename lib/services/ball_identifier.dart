@@ -45,6 +45,11 @@ class BallIdentifier {
   int _consecutiveMissedFrames = 0;
   TrackedObject? _currentBallTrack;
 
+  /// Session lock: when active, BallIdentifier will NOT re-acquire to any
+  /// other trackID. Only the currently locked trackID is followed.
+  /// Activated on kick detection, deactivated on HIT/MISS/LOST decision.
+  bool _sessionLocked = false;
+
   final ListQueue<TrackedPosition> _trail = ListQueue<TrackedPosition>();
 
   BallIdentifier({
@@ -75,6 +80,21 @@ class BallIdentifier {
 
   /// Whether the ball has been missing for [ballLostThreshold]+ frames.
   bool get isBallLost => _consecutiveMissedFrames >= ballLostThreshold;
+
+  /// Whether the session lock is currently active.
+  bool get isSessionLocked => _sessionLocked;
+
+  /// Activate session lock — stop re-acquiring to other trackIDs.
+  void activateSessionLock() {
+    _sessionLocked = true;
+    print('DIAG-BALLID: session lock ACTIVATED (trackId=$_currentBallTrackId)');
+  }
+
+  /// Deactivate session lock — allow normal re-acquisition.
+  void deactivateSessionLock() {
+    _sessionLocked = false;
+    print('DIAG-BALLID: session lock DEACTIVATED');
+  }
 
   /// Current ball velocity from the tracker's Kalman state.
   Offset? get velocity => _currentBallTrack?.velocity;
@@ -127,7 +147,8 @@ class BallIdentifier {
     }
 
     // Priority 2: Current track lost — find the only moving ball-class track
-    if (ball == null && _currentBallTrackId != null) {
+    // SKIPPED when session lock is active (don't re-acquire during kick).
+    if (ball == null && _currentBallTrackId != null && !_sessionLocked) {
       // DIAG: Log when the locked ball track is lost, with all candidates.
       final candidateInfo = ballTracks.map((t) =>
           'id:${t.trackId}(${t.bbox.width.toStringAsFixed(3)}x${t.bbox.height.toStringAsFixed(3)} '
@@ -159,6 +180,9 @@ class BallIdentifier {
       } else {
         print('DIAG-BALLID: ${movingTracks.length} moving tracks — ambiguous, skipping re-acquisition');
       }
+    } else if (ball == null && _currentBallTrackId != null && _sessionLocked) {
+      // Session locked — do NOT re-acquire. Ride out the loss.
+      print('DIAG-BALLID: locked trackId=$_currentBallTrackId LOST but session lock ACTIVE — skipping re-acquisition');
     } else if (ball == null) {
       // No prior ball ID — first-time search
       final movingTracks = ballTracks
@@ -174,7 +198,8 @@ class BallIdentifier {
     }
 
     // Priority 3: No single moving track — find nearest non-static to last position
-    if (ball == null && _lastBallPosition != null) {
+    // SKIPPED when session lock is active (don't re-acquire during kick).
+    if (ball == null && _lastBallPosition != null && !_sessionLocked) {
       final candidates = ballTracks
           .where((t) => !t.isStatic && t.state == TrackState.tracked)
           .toList();
@@ -232,6 +257,7 @@ class BallIdentifier {
     _lastBallPosition = null;
     _lastBallBboxArea = null;
     _consecutiveMissedFrames = 0;
+    _sessionLocked = false;
     _trail.clear();
   }
 
