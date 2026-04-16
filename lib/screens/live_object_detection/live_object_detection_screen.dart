@@ -587,6 +587,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
               final tracks = _byteTracker.update(
                 detections,
                 lockedTrackId: _ballId.currentBallTrackId,
+                lastMeasuredBallArea: _ballId.lastBallBboxArea,
               );
 
               setState(() {
@@ -1128,7 +1129,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
           // Calibrate / Re-calibrate button.
           if (!_awaitingReferenceCapture)
             Positioned(
-            bottom: 16,
+            bottom: 48,
             left: 16,
             child: ElevatedButton.icon(
               onPressed: _calibrationMode ? null : _startCalibration,

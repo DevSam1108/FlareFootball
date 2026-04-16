@@ -219,8 +219,8 @@ class CalibrationOverlay extends CustomPainter {
     final centerY = size.height / 2;
 
     final linePaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.3)
-      ..strokeWidth = 0.5;
+      ..color = Colors.purple.withValues(alpha: 0.5)
+      ..strokeWidth = 1.5;
 
     // Dashed horizontal line across full width.
     _drawDashedLine(
@@ -244,9 +244,9 @@ class CalibrationOverlay extends CustomPainter {
 
     // Small center circle for precise reference.
     final circlePaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.4)
+      ..color = Colors.purple.withValues(alpha: 0.6)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0;
+      ..strokeWidth = 1.5;
     canvas.drawCircle(Offset(centerX, centerY), 6.0, circlePaint);
   }
 

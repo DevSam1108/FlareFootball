@@ -593,7 +593,7 @@ class ByteTrackTracker {
   /// Mahalanobis fallback matching (Stage 2). All other tracks use IoU only.
   /// This prevents static circle tracks from being pulled to wrong positions
   /// by the wide Mahalanobis gate.
-  List<TrackedObject> update(List<Detection> detections, {int? lockedTrackId}) {
+  List<TrackedObject> update(List<Detection> detections, {int? lockedTrackId, double? lastMeasuredBallArea}) {
     // 1. Predict all existing tracks
     for (final t in _trackedTracks) t.predict();
     for (final t in _lostTracks) t.predict();
@@ -620,6 +620,7 @@ class ByteTrackTracker {
       matchedTrackIdx: matchedTrackIndices,
       matchedDetIdx: matchedDetIndices,
       lockedTrackId: lockedTrackId,
+      lastMeasuredBallArea: lastMeasuredBallArea,
     );
 
     // Collect unmatched tracked tracks
@@ -642,6 +643,7 @@ class ByteTrackTracker {
       matchedTrackIdx: matchedPass2TrackIdx,
       matchedDetIdx: matchedPass2DetIdx,
       lockedTrackId: lockedTrackId,
+      lastMeasuredBallArea: lastMeasuredBallArea,
     );
 
     // Also try matching remaining high-confidence detections to lost tracks
@@ -662,6 +664,7 @@ class ByteTrackTracker {
       matchedTrackIdx: matchedLostIdx,
       matchedDetIdx: matchedRemHighIdx,
       lockedTrackId: lockedTrackId,
+      lastMeasuredBallArea: lastMeasuredBallArea,
     );
 
     // 5. Mark truly unmatched tracks as lost
@@ -808,6 +811,7 @@ class ByteTrackTracker {
     required Set<int> matchedTrackIdx,
     required Set<int> matchedDetIdx,
     int? lockedTrackId,
+    double? lastMeasuredBallArea,
   }) {
     if (tracks.isEmpty || dets.isEmpty) return;
 
@@ -850,12 +854,14 @@ class ByteTrackTracker {
         if (matchedDetIdx.contains(di)) continue;
 
         // Bbox area ratio check — reject if detection size is too different
-        // from the track's predicted size. Prevents Mahalanobis rescue from
-        // hijacking the ball track to a player head or other false positive.
-        final trackArea = tracks[ti].kalman.width.abs() * tracks[ti].kalman.height.abs();
+        // from the ball's last measured size. Uses real measurement instead of
+        // Kalman predicted area (which drifts during pure predictions).
+        // Falls back to Kalman predicted area if no measurement available.
+        final refArea = lastMeasuredBallArea ??
+            (tracks[ti].kalman.width.abs() * tracks[ti].kalman.height.abs());
         final detArea = dets[di].bbox.width * dets[di].bbox.height;
-        final areaRatio = trackArea > 0 ? detArea / trackArea : 0.0;
-        if (areaRatio > 2.0 || areaRatio < 0.5) continue;
+        final areaRatio = refArea > 0 ? detArea / refArea : 0.0;
+        if (areaRatio > 2.0 || areaRatio < 0.3) continue;
 
         final mahalSq = tracks[ti].kalman.mahalanobisDistSq(dets[di].bbox);
         if (mahalSq != null && mahalSq <= _chi2Threshold95) {
