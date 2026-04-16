@@ -30,11 +30,14 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 **Evidence:** Log shows 5 consecutive frames with identical velocity (Kalman predictions, no matched detections) during confirmed ball flight. Ball visibly hit zone 7 but app showed no tracking.
 
-**Fix options:**
-1. Compare against last measured area instead of Kalman predicted area
-2. Relax threshold to 3.0-3.5 (hijack cases were 3.8x-9x, so room exists)
+**Fix iterations (2026-04-16):**
+1. Relaxed Kalman threshold (3.5/0.3) → 4/5 kicks, but false positive dots returned
+2. Last-measured-area with tight bounds (2.0/0.5) → 3/5 kicks (lower bound too tight, ball shrinks in flight)
+3. Last-measured-area with relaxed lower bound (2.0/0.3) → **5/5 kicks across 3 test runs** ✅
 
-**Status:** 🔴 OPEN — area ratio check needs tuning before next field test.
+**Fix:** `ByteTrackTracker.update()` and `_greedyMatch()` accept `lastMeasuredBallArea` from `BallIdentifier.lastBallBboxArea`. Area ratio compares against real measurement with Kalman fallback. Threshold: upper 2.0 (blocks hijacking at 3.8x+), lower 0.3 (allows ball shrinking during flight).
+
+**Status:** ✅ FIXED (2026-04-16). Ground testing scheduled 2026-04-17.
 
 ---
 

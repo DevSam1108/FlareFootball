@@ -1140,6 +1140,19 @@
 - **Trade-offs Accepted:** Current 2.0 threshold causes 2/5 kicks to go silent. Must be tuned before field testing.
 - **Status:** Accepted but NEEDS TUNING (ISSUE-029). Next step: compare against last measured area instead of Kalman predicted, or relax threshold to 3.0-3.5.
 
+### ADR-072: Last-Measured-Area for Mahalanobis Rescue Area Ratio Check
+
+- **Date:** 2026-04-16
+- **Context:** ISSUE-029 — the original area ratio check (ADR-071) compared detection area against Kalman predicted area with 2.0/0.5 threshold. During fast kicks, Kalman predicted area drifts during pure prediction frames (no matched detections), causing legitimate YOLO detections to be rejected. 2/5 kicks went silent.
+- **Options Considered:**
+  1. **Relax threshold only (3.5/0.3)** — simple 1-line change. Tested: 4/5 kicks tracked, but false positive dots returned (threshold too loose for hijacking prevention).
+  2. **Last-measured-area with tight bounds (2.0/0.5)** — compare against `BallIdentifier.lastBallBboxArea` (last real YOLO measurement) instead of Kalman predicted. Tested: 3/5 kicks (worse — lower bound 0.5 blocks shrinking ball during flight toward target).
+  3. **Last-measured-area with asymmetric bounds (2.0/0.3)** — tight upper bound (blocks hijacking at 3.8x+), relaxed lower bound (allows ball shrinking as it flies away from camera). Tested: 5/5 kicks across 3 test runs.
+- **Decision:** Option 3 — last-measured-area with 2.0/0.3 threshold.
+- **Rationale:** Last measured area is stable during prediction-only frames (doesn't drift like Kalman). Asymmetric threshold accounts for the physical reality: ball shrinks as it flies toward target (needs lower bound room), but never grows >2x between frames (upper bound stays tight). Hijack cases had ratios of 3.8x-9x, so 2.0 upper bound safely rejects them.
+- **Trade-offs Accepted:** False positive trail dots still appear during active kicks (from non-Mahalanobis paths). May need additional filtering.
+- **Status:** Accepted. Monitor-tested 5/5. Pending ground test 2026-04-17.
+
 ---
 
 *Decision log created: 2026-03-13*

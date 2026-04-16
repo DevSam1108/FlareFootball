@@ -400,23 +400,40 @@
 | Stability | Corner positions stable | 0.5s |
 
 ### Session Lock + Protected Track + Trail Suppression (2026-04-15)
-✅ **Status:** IMPLEMENTED & MONITOR-TESTED. Eliminates false positive trail dots. Needs threshold tuning.
+✅ **Status:** IMPLEMENTED & MONITOR-TESTED. Eliminates false positive trail dots.
 
 **Changes:**
 - **BallIdentifier session lock** — `_sessionLocked` flag blocks Priority 2/3 re-acquisition during active kicks. Activated on `KickDetector.isKickActive`, deactivated on HIT/MISS/LOST decision.
 - **ByteTrack protected track** — `_protectedTrackId` gets 60-frame survival (vs default 30) to maintain locked ball track during flight.
 - **Trail suppression** — TrailOverlay receives empty trail when `kickState == idle`. Dots only shown during confirming/active/refractory.
-- **Bbox area ratio check on Mahalanobis rescue** — Rejects rescue candidates with area >2x or <0.5x track's predicted area. Prevents identity hijacking (ISSUE-026).
+- **Bbox area ratio check on Mahalanobis rescue** — Rejects rescue candidates with area >2x or <0.3x last measured ball area. Uses last real measurement instead of drifting Kalman predicted area.
 
-**Test results (5 kicks):**
-- 3/5 correctly detected and announced
-- 2/5 silent (no tracking, no decision)
-- 0 false positive dots (was the main goal)
+**Test results (2026-04-16, after area ratio fix):**
+- 5/5 kicks detected across 3 test runs
+- False positive dots still appearing during active kicks (open issue)
 
 **Known issues:**
-- Area ratio check (2.0/0.5) too aggressive — blocks legitimate tracking during fast kicks. Kalman predicted area diverges during pure predictions, real detections get rejected.
 - Session lock has no safety timeout — can get stuck permanently if locked track is lost without a decision (e.g., bounce-back triggers false kick, ball disappears).
 - Bounce-back after legitimate kick triggers false kick detection.
+- False positive trail dots during active kicks (not idle — idle dots fixed by trail suppression).
+
+### Mahalanobis Area Ratio Fix — Last-Measured-Area (2026-04-16, ISSUE-029)
+✅ **Status:** FIXED & MONITOR-TESTED. 5/5 kicks across 3 test runs.
+
+**Problem:** Area ratio check (2.0/0.5) compared detection area against Kalman predicted area. During fast kicks, Kalman predictions drift → legitimate rescues blocked → silent kicks (2/5).
+
+**Iterations tested:**
+1. Relaxed Kalman threshold (3.5/0.3) → 4/5 kicks, but false positive dots returned
+2. Last-measured-area with tight bounds (2.0/0.5) → 3/5 kicks (lower bound too tight, ball shrinks in flight)
+3. Last-measured-area with relaxed lower bound (2.0/0.3) → **5/5 kicks** ✅
+
+**Fix:** `ByteTrackTracker.update()` and `_greedyMatch()` accept `lastMeasuredBallArea` from `BallIdentifier.lastBallBboxArea`. Area ratio compares against real measurement with Kalman fallback. Threshold: upper 2.0 (blocks hijacking at 3.8x+), lower 0.3 (allows ball shrinking during flight).
+
+### UI Refinements (2026-04-16)
+✅ **Status:** IMPLEMENTED.
+- **Center crosshair** — Color changed from white (alpha 0.3) to purple (alpha 0.5). StrokeWidth from 0.5 to 1.5 for visibility against brick walls and varied backgrounds.
+- **Calibrate/Re-calibrate button** — Repositioned from `bottom:16` to `bottom:48` to sit above the tilt indicator (was overlapping).
+- **Large result overlay** — Re-enabled (was commented out for testing).
 
 ### `tennis-ball` Priority 2 Concession (Minor)
 ⚠️ **Status:** Still in code at `live_object_detection_screen.dart:56`. Harmless.
@@ -485,10 +502,11 @@
 | **Full bounding box as primary tracking data (ADR-059)** | **Existing pipeline extracted only bbox center (2 values), discarding width/height. This limited Kalman to 4-state (no size prediction), made IoU matching impossible, and required separate depth estimation. New approach: 8-state Kalman tracks full bbox + rates of change. Enables IoU matching for fast balls (predicted bbox accounts for motion + size change), built-in depth tracking, and richer object discrimination.** |
 | **Pre-ByteTrack AR > 1.8 upper bound only (ADR-068)** | **Rejects elongated YOLO false positives (torso AR 2.4-3.6) before ByteTrack. Upper bound only — no lower bound (no tall-narrow false positives observed, lower bound risked rejecting real ball). Real ball AR max ~1.5; threshold 1.8 gives margin. 2 lines, no pipeline changes. Player head (AR 0.9) still passes — needs different approach.** |
 
-### ⚙️ Mahalanobis Rescue Identity Hijacking (ISSUE-026)
-- **Status:** Identified. CRITICAL priority. Fix code written, tested (176/176), and reverted (2026-04-13) — keeping one-change-at-a-time discipline. Ready to re-apply after AR filter field test.
-- **Blocker:** Locked track jumps to false positives (video player, wall marks, kicker body) via Mahalanobis distance matching. Causes total tracking loss.
-- **Resolution:** Add size ratio check (reject >3x or <0.33x area) and velocity direction check (dot product, reject if detection behind ball motion) in `_greedyMatch()` Mahalanobis rescue loop.
+### ⚙️ Mahalanobis Rescue Identity Hijacking (ISSUE-026) — PARTIALLY FIXED
+- **Status:** Partially fixed via last-measured-area ratio check (2026-04-16, ADR-072). Hijack cases (3.8x-9x ratios) now blocked by upper bound 2.0. False positive dots still appear during active kicks (likely from non-rescue paths).
+- **Original blocker:** Locked track jumps to false positives via Mahalanobis distance matching.
+- **What's done:** Area ratio check using last measured ball area (not Kalman predicted). Threshold 2.0/0.3.
+- **What remains:** Velocity direction check (dot product) not yet implemented. False positive dots during active kicks may come from other sources.
 
 ### ✅ isStatic Flag Never Clears (ISSUE-027) — FIXED (2026-04-13)
 - **Status:** Fixed and device-verified.
@@ -508,7 +526,8 @@
 
 | **Session lock to prevent false positive re-acquisition** | **Manager's suggestion: lock ball trackID during kick, reject all others. Works at BallIdentifier level without modifying ByteTrack matching (avoids pitfalls of detection-level filters).** |
 | **Trail suppression during kick=idle** | **Dots only during confirming/active/refractory. Eliminates visual noise between kicks without affecting pipeline data collection.** |
-| **Bbox area ratio check on Mahalanobis rescue** | **Physical constraint: ball can't change size >2x between frames. Prevents hijacking (3.8x-9x jumps) but 2.0 threshold too aggressive for fast kicks.** |
+| **Bbox area ratio check on Mahalanobis rescue** | **Physical constraint: ball can't change size >2x between frames. Prevents hijacking (3.8x-9x jumps). Uses last measured area (not Kalman predicted) to avoid drift. Threshold 2.0/0.3 — tight upper, relaxed lower for ball shrinking during flight.** |
+| **Last-measured-area for Mahalanobis ratio (ADR-072)** | **Kalman predicted area drifts during pure predictions, blocking legitimate rescues. Last measured area is stable. Tested 3 iterations: relaxed Kalman (4/5), tight last-measured (3/5), relaxed-lower last-measured (5/5). 2.0/0.3 threshold balances hijack prevention vs ball tracking.** |
 
 ---
 

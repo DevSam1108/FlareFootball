@@ -2,6 +2,29 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## Mahalanobis Area Ratio Fix + UI Refinements (2026-04-16)
+
+### Summary
+Fixed silent kicks caused by over-aggressive Mahalanobis rescue area ratio check (ISSUE-029). Three iterations tested: (1) relaxed Kalman threshold 3.5/0.3 — 4/5 kicks but false positive dots returned, (2) last-measured-area with tight 2.0/0.5 — 3/5 kicks (lower bound too tight), (3) last-measured-area with 2.0/0.3 — 5/5 kicks across 3 test runs. Also updated center crosshair to purple at 1.5 strokeWidth for visibility, repositioned calibrate button above tilt indicator, and re-enabled large result overlay.
+
+### Modified Files
+- **`lib/services/bytetrack_tracker.dart`** — `update()` and `_greedyMatch()` accept `lastMeasuredBallArea` optional parameter. Area ratio check uses last measured area (with Kalman fallback). Threshold: 2.0/0.3. All 3 `_greedyMatch` call sites updated.
+- **`lib/screens/live_object_detection/live_object_detection_screen.dart`** — `_byteTracker.update()` passes `_ballId.lastBallBboxArea`. Calibrate button `bottom:16` → `bottom:48`. Large result overlay re-enabled.
+- **`lib/screens/live_object_detection/widgets/calibration_overlay.dart`** — Center crosshair: white → purple, strokeWidth 0.5 → 1.5. Center circle: white → purple, strokeWidth 1.0 → 1.5.
+
+### Verification
+```
+$ flutter analyze -- 0 errors, 0 warnings, 84 infos
+$ flutter test -- 176/176 passing
+```
+
+### Monitor Test Results
+- 5/5 kicks detected across 3 test runs ✅
+- False positive dots still appearing during active kicks ❌ (open issue)
+- Ground testing scheduled for 2026-04-17
+
+---
+
 ## Session Lock + Protected Track + Trail Suppression + Mahalanobis Area Ratio (2026-04-15)
 
 ### Summary
