@@ -40,6 +40,7 @@ class DiagnosticLogger {
       'depth_ratio,smoothed_x,smoothed_y,vel_x,vel_y,vel_mag,'
       'phase,direct_zone,extrap_zone,wall_pred_zone,est_depth,'
       'frames_to_wall,kick_confirmed,kick_state,'
+      'track_id,is_static,confidence,bbox_w,bbox_h,session_locked,'
       'result,zone,reason',
     );
     _active = true;
@@ -62,6 +63,12 @@ class DiagnosticLogger {
     int? framesToWall,
     required bool kickConfirmed,
     required String kickState,
+    int? trackId,
+    bool? isStatic,
+    double? confidence,
+    double? bboxW,
+    double? bboxH,
+    required bool sessionLocked,
   }) {
     if (!_active || _sink == null) return;
     final ts = DateTime.now().millisecondsSinceEpoch;
@@ -87,6 +94,12 @@ class DiagnosticLogger {
       framesToWall?.toString() ?? '',
       kickConfirmed ? '1' : '0',
       kickState,
+      trackId?.toString() ?? '',
+      isStatic != null ? (isStatic ? '1' : '0') : '',
+      confidence?.toStringAsFixed(4) ?? '',
+      bboxW?.toStringAsFixed(4) ?? '',
+      bboxH?.toStringAsFixed(4) ?? '',
+      sessionLocked ? '1' : '0',
       '',
       '',
       '',
@@ -107,7 +120,8 @@ class DiagnosticLogger {
       '', '', '', '', '', '', '', '', '', '',
       'result',
       '', '', '', '', '', // direct_zone, extrap_zone, wall_pred_zone, est_depth, frames_to_wall
-      '', '', // kick_confirmed, kick_state (empty for DECISION rows)
+      '', '', // kick_confirmed, kick_state
+      '', '', '', '', '', '', // track_id, is_static, confidence, bbox_w, bbox_h, session_locked
       result,
       zone?.toString() ?? '',
       reason,
