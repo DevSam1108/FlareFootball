@@ -770,6 +770,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                     framesToWall: null,
                     kickConfirmed: _kickDetector.isKickActive,
                     kickState: _kickDetector.state.name,
+                    trackId: ball?.trackId,
+                    isStatic: ball?.isStatic,
+                    confidence: ball?.confidence,
+                    bboxW: ball?.bbox.width,
+                    bboxH: ball?.bbox.height,
+                    sessionLocked: _ballId.isSessionLocked,
                   );
                 }
               });
