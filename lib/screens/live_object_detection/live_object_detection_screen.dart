@@ -18,6 +18,7 @@ import 'package:tensorflow_demo/services/target_zone_mapper.dart';
 import 'package:tensorflow_demo/services/kick_detector.dart';
 import 'package:tensorflow_demo/services/trajectory_extrapolator.dart';
 import 'package:tensorflow_demo/services/wall_plane_predictor.dart';
+import 'package:tensorflow_demo/utils/canvas_dash_utils.dart';
 import 'package:tensorflow_demo/utils/yolo_coord_utils.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
@@ -132,6 +133,14 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   /// The confirmed reference bbox area for runtime depth filtering.
   double? _referenceBboxArea;
+
+  /// Anchor rectangle in normalized [0,1] coords, computed at lock
+  /// (Confirm tap) from the locked ball's bbox: 3× bbox width × 1.5×
+  /// bbox height, centered on the locked ball's bbox center. Frozen
+  /// after lock — does not follow the ball. Null before lock and after
+  /// recalibration. Phase 2 of the Anchor Rectangle feature: drawn as
+  /// a magenta dashed overlay; no filtering yet. See ADR-076.
+  Rect? _anchorRectNorm;
 
   /// Index of the corner currently being dragged, or null if not dragging.
   int? _draggingCornerIndex;
@@ -338,6 +347,10 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       _ballCandidates = const [];
       _selectedTrackId = null;
       _cancelAudioNudgeTimer();
+
+      // Phase 2 (Anchor Rectangle): clear the anchor rectangle so a fresh
+      // calibration starts with no overlay, consistent with Recal-1 full reset.
+      _anchorRectNorm = null;
     });
   }
 
@@ -652,12 +665,29 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     // setState closure below.
     final TrackedObject selected = maybeSelected;
 
+    // Phase 2 (Anchor Rectangle, ADR-076): look up the locked ball's bbox
+    // among the latest candidates and compute the anchor rectangle from it
+    // (3× bbox width × 1.5× bbox height, centered on bbox center). Done
+    // before setState so the new rect is applied atomically.
+    Rect? anchorRect;
+    for (final c in _ballCandidates) {
+      if (c.trackId == _selectedTrackId) {
+        anchorRect = Rect.fromCenter(
+          center: c.bbox.center,
+          width: c.bbox.width * 3.0,
+          height: c.bbox.height * 1.5,
+        );
+        break;
+      }
+    }
+
     setState(() {
       _referenceBboxArea = _referenceCandidateBboxArea;
       _impactDetector.setReferenceBboxArea(_referenceBboxArea!);
       _awaitingReferenceCapture = false;
       _calibrationMode = false;
       _pipelineLive = true;
+      _anchorRectNorm = anchorRect;
 
       // Lock ByteTrack onto the player-selected track.
       _ballId.setReferenceTrack(selected);
@@ -1289,6 +1319,29 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
               },
             ),
 
+          // Anchor rectangle — drawn after lock (Confirm tap) and persists
+          // until recalibration or screen exit. Phase 2 of the Anchor
+          // Rectangle feature: visual only, no filtering (see ADR-076).
+          // IgnorePointer so taps always pass through to underlying handlers.
+          if (_anchorRectNorm != null)
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final canvasSize = Size(
+                  constraints.maxWidth,
+                  constraints.maxHeight,
+                );
+                return IgnorePointer(
+                  child: CustomPaint(
+                    size: canvasSize,
+                    painter: _AnchorRectanglePainter(
+                      rectNorm: _anchorRectNorm!,
+                      cameraAspectRatio: 4.0 / 3.0,
+                    ),
+                  ),
+                );
+              },
+            ),
+
           // "Confirm" button for reference capture sub-phase.
           if (_awaitingReferenceCapture)
             Positioned(
@@ -1489,5 +1542,62 @@ class _ReferenceBboxPainter extends CustomPainter {
       }
     }
     return false;
+  }
+}
+
+/// Paints the anchor rectangle as a magenta, dashed, 2 px stroke with no
+/// fill. The rectangle is provided in normalized [0,1] coords and
+/// converted to canvas pixels via [YoloCoordUtils.toCanvasPixel] (same
+/// transform used by every other overlay on this screen).
+///
+/// Phase 2 of the Anchor Rectangle feature: visual only, no filtering.
+/// See ADR-076 for the design decisions (bbox-relative sizing, frozen
+/// center, screen-axis-aligned, magenta dashed).
+class _AnchorRectanglePainter extends CustomPainter {
+  /// Anchor rectangle in normalized [0,1] space.
+  final Rect rectNorm;
+  final double cameraAspectRatio;
+
+  static const _magentaStroke = Color(0xFFFF00FF);
+
+  _AnchorRectanglePainter({
+    required this.rectNorm,
+    required this.cameraAspectRatio,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
+
+    final topLeft = YoloCoordUtils.toCanvasPixel(
+      Offset(rectNorm.left, rectNorm.top),
+      size,
+      cameraAspectRatio,
+    );
+    final bottomRight = YoloCoordUtils.toCanvasPixel(
+      Offset(rectNorm.right, rectNorm.bottom),
+      size,
+      cameraAspectRatio,
+    );
+    final topRight = Offset(bottomRight.dx, topLeft.dy);
+    final bottomLeft = Offset(topLeft.dx, bottomRight.dy);
+
+    final paint = Paint()
+      ..color = _magentaStroke
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+
+    // 4 dashed edges — shared helper keeps dash math identical to the
+    // calibration center crosshair.
+    drawDashedLine(canvas, topLeft, topRight, paint);
+    drawDashedLine(canvas, topRight, bottomRight, paint);
+    drawDashedLine(canvas, bottomRight, bottomLeft, paint);
+    drawDashedLine(canvas, bottomLeft, topLeft, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _AnchorRectanglePainter oldDelegate) {
+    return rectNorm != oldDelegate.rectNorm ||
+        cameraAspectRatio != oldDelegate.cameraAspectRatio;
   }
 }

@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:tensorflow_demo/services/target_zone_mapper.dart';
+import 'package:tensorflow_demo/utils/canvas_dash_utils.dart';
 import 'package:tensorflow_demo/utils/yolo_coord_utils.dart';
 
 /// CustomPainter for the calibration UI: corner markers, green grid overlay,
@@ -223,7 +224,7 @@ class CalibrationOverlay extends CustomPainter {
       ..strokeWidth = 1.5;
 
     // Dashed horizontal line across full width.
-    _drawDashedLine(
+    drawDashedLine(
       canvas,
       Offset(0, centerY),
       Offset(size.width, centerY),
@@ -233,7 +234,7 @@ class CalibrationOverlay extends CustomPainter {
     );
 
     // Dashed vertical line across full height.
-    _drawDashedLine(
+    drawDashedLine(
       canvas,
       Offset(centerX, 0),
       Offset(centerX, size.height),
@@ -248,32 +249,6 @@ class CalibrationOverlay extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
     canvas.drawCircle(Offset(centerX, centerY), 6.0, circlePaint);
-  }
-
-  void _drawDashedLine(
-    Canvas canvas,
-    Offset start,
-    Offset end,
-    Paint paint, {
-    double dashLength = 8,
-    double gapLength = 6,
-  }) {
-    final dx = end.dx - start.dx;
-    final dy = end.dy - start.dy;
-    final totalLength = math.sqrt(dx * dx + dy * dy);
-    final unitDx = dx / totalLength;
-    final unitDy = dy / totalLength;
-
-    var drawn = 0.0;
-    while (drawn < totalLength) {
-      final dashEnd = math.min(drawn + dashLength, totalLength);
-      canvas.drawLine(
-        Offset(start.dx + unitDx * drawn, start.dy + unitDy * drawn),
-        Offset(start.dx + unitDx * dashEnd, start.dy + unitDy * dashEnd),
-        paint,
-      );
-      drawn += dashLength + gapLength;
-    }
   }
 
   // ---------------------------------------------------------------------------
