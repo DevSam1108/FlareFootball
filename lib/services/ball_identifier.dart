@@ -105,29 +105,21 @@ class BallIdentifier {
   /// Trail history for [TrailOverlay]. Same data contract as BallTracker.trail.
   List<TrackedPosition> get trail => List.unmodifiable(_trail);
 
-  /// Lock onto the ball during reference capture.
+  /// Lock onto a specific track during reference capture.
   ///
-  /// Among all ball-class tracks, selects the one with the largest bbox area
-  /// (closest to camera). Called when the user taps "Confirm" during reference
-  /// capture.
-  void setReferenceTrack(List<TrackedObject> tracks) {
-    // During reference capture, accept ANY ball-class tracked detection —
-    // including static ones. The real ball may have been stationary on the
-    // ground for 1000+ frames and ByteTrack would have flagged it static.
-    // The static filter is for live play, not for setup.
-    final ballTracks = tracks
-        .where((t) =>
-            ballClassNames.contains(t.className) &&
-            t.state == TrackState.tracked)
-        .toList();
-    if (ballTracks.isEmpty) return;
-
-    // Largest bbox = closest to camera = the real ball
-    ballTracks.sort((a, b) => b.bboxArea.compareTo(a.bboxArea));
-    _currentBallTrackId = ballTracks.first.trackId;
-    _currentBallTrack = ballTracks.first;
-    _lastBallPosition = ballTracks.first.center;
-    _lastBallBboxArea = ballTracks.first.bboxArea;
+  /// Phase 1 (Anchor Rectangle, 2026-04-19): The track is now chosen by the
+  /// player via tap-to-select instead of the previous auto-pick-largest
+  /// heuristic. The screen layer looks up the tapped trackId in
+  /// [ByteTrackTracker.tracks] and passes the resolved [TrackedObject] here.
+  ///
+  /// Caller is responsible for ensuring the track is currently `tracked` and
+  /// of an accepted ball class — the screen's tap handler enforces both via
+  /// [_findNearestBall].
+  void setReferenceTrack(TrackedObject track) {
+    _currentBallTrackId = track.trackId;
+    _currentBallTrack = track;
+    _lastBallPosition = track.center;
+    _lastBallBboxArea = track.bboxArea;
     _consecutiveMissedFrames = 0;
   }
 

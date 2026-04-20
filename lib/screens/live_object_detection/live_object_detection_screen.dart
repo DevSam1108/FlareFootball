@@ -77,10 +77,24 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   /// All ball-class tracks from the latest ByteTrack frame (for debug overlay).
   List<TrackedObject> _debugBallClassTracks = const [];
 
-  /// Bounding box of the reference ball candidate during reference capture.
-  /// Used to render a red bounding box so the user can verify the correct
-  /// object is selected before tapping Confirm.
-  Rect? _referenceCandidateBbox;
+  /// All ball-class tracks (state == tracked) in the latest frame, captured
+  /// during the awaiting-reference-capture sub-phase. Each entry is the
+  /// trackId + its current normalized bbox. Drives the multi-bbox painter:
+  /// every entry gets a red bbox unless its trackId == [_selectedTrackId],
+  /// in which case it gets the green selected-bbox treatment.
+  List<({int trackId, Rect bbox})> _ballCandidates = const [];
+
+  /// The trackId the player tapped during the awaiting-reference-capture
+  /// sub-phase. Null when no selection is active. Cleared automatically when
+  /// the underlying track is no longer present in the latest frame
+  /// (Decision B-i: selection clears on disappearance).
+  int? _selectedTrackId;
+
+  /// Periodic audio nudge timer for State 2 ("Tap the ball you want to use").
+  /// Fires once after a 30 s grace period, then every 10 s until the player
+  /// taps. Always cancelled on first tap, on State 2 → State 1/3 transitions,
+  /// in [dispose], and in [_startCalibration] (Recal-1 full reset).
+  Timer? _audioNudgeTimer;
 
   /// Android display rotation (Surface.ROTATION_*: 0=0°, 1=90°, 3=270°).
   /// Used to correct normalizedBox coordinates for landscape direction.
@@ -316,8 +330,14 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       _wallPredictor?.reset();
       _awaitingReferenceCapture = false;
       _referenceCandidateBboxArea = null;
-      _referenceCandidateBbox = null;
       _referenceBboxArea = null;
+
+      // Phase 1 (Anchor Rectangle, 2026-04-19): Recal-1 — full reset.
+      // Clear tap selection + multi-bbox candidates and cancel any pending
+      // audio nudge so a fresh calibration starts at State 1 cleanly.
+      _ballCandidates = const [];
+      _selectedTrackId = null;
+      _cancelAudioNudgeTimer();
     });
   }
 
@@ -515,11 +535,123 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     return (nearest != null && minDist < _dragHitRadius) ? nearest : null;
   }
 
+  /// Phase 1 (Anchor Rectangle, 2026-04-19): Returns the trackId of the ball
+  /// candidate that best matches a tap at [normalizedPosition], or null.
+  ///
+  /// Tap-2 rule (decisions table row 3):
+  ///   1. If the tap lands INSIDE any candidate's bbox, that candidate wins
+  ///      (direct hit beats nearest-by-center).
+  ///   2. Otherwise, return the candidate whose bbox center is closest to
+  ///      the tap, but only if that distance is within [_dragHitRadius].
+  ///   3. Otherwise null (no-op).
+  ///
+  /// Mirrors the structure of [_findNearestCorner] — same single-pass loop,
+  /// same radius constant, same null-when-out-of-range contract.
+  int? _findNearestBall(Offset normalizedPosition) {
+    // Pass 1: direct hit.
+    for (final c in _ballCandidates) {
+      if (c.bbox.contains(normalizedPosition)) return c.trackId;
+    }
+    // Pass 2: nearest center within radius.
+    double minDist = double.infinity;
+    int? nearest;
+    for (final c in _ballCandidates) {
+      final dist = (c.bbox.center - normalizedPosition).distance;
+      if (dist < minDist) {
+        minDist = dist;
+        nearest = c.trackId;
+      }
+    }
+    return (nearest != null && minDist < _dragHitRadius) ? nearest : null;
+  }
+
+  /// Phase 1 (Anchor Rectangle, 2026-04-19): Tap handler for the
+  /// awaiting-reference-capture sub-phase. Converts the tap to normalized
+  /// coords (same `YoloCoordUtils.fromCanvasPixel` as `_handleCalibrationTap`)
+  /// and runs Tap-2 via [_findNearestBall].
+  ///
+  /// Decision A-i (last-tap-wins): a tap that resolves to any candidate
+  /// simply overwrites [_selectedTrackId]. A tap that resolves to nothing
+  /// is a no-op — we DO NOT clear an existing selection on an off-target tap
+  /// (the player may have been adjusting a corner that the gesture arena
+  /// classified as a tap-up).
+  void _handleBallTap(TapUpDetails details, Size canvasSize) {
+    if (!_awaitingReferenceCapture) return;
+    if (_ballCandidates.isEmpty) return;
+
+    final normalized = YoloCoordUtils.fromCanvasPixel(
+      details.localPosition,
+      canvasSize,
+      4.0 / 3.0,
+    );
+    final hitTrackId = _findNearestBall(normalized);
+    if (hitTrackId == null) return;
+
+    setState(() {
+      _selectedTrackId = hitTrackId;
+      // First tap of this State 2 episode: silence the audio nudge.
+      _cancelAudioNudgeTimer();
+    });
+  }
+
+  /// Phase 1 (Anchor Rectangle, 2026-04-19): Schedule the State 2 tap-prompt
+  /// nudge. First fire after a 30 s grace period, then every 10 s until
+  /// cancelled (decisions table row 7). Always cancel any previous timer
+  /// before starting a new one — guarantees no overlap on rapid State 1↔2
+  /// flutters.
+  ///
+  /// Also resets the per-episode counter in [AudioService] so the device
+  /// log shows `AUDIO-STUB #1` at the start of every fresh waiting episode
+  /// (helpful for on-device cadence verification while the audio asset is
+  /// still a Phase 5 stub).
+  void _startAudioNudgeTimer() {
+    _cancelAudioNudgeTimer();
+    _audioService.resetTapPromptCounter();
+    _audioNudgeTimer = Timer(const Duration(seconds: 30), () {
+      _audioService.playTapPrompt();
+      _audioNudgeTimer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => _audioService.playTapPrompt(),
+      );
+    });
+  }
+
+  /// Phase 1 (Anchor Rectangle, 2026-04-19): Cancel any in-flight audio
+  /// nudge timer and clear the field. Safe to call when no timer is active.
+  void _cancelAudioNudgeTimer() {
+    _audioNudgeTimer?.cancel();
+    _audioNudgeTimer = null;
+  }
+
   /// Called when user taps "Confirm" during reference capture sub-phase.
-  /// Captures the currently detected ball's bbox area as the reference
-  /// and locks the ByteTrack ball identity.
+  /// Captures the player-selected ball's bbox area as the reference and
+  /// locks the ByteTrack ball identity onto that specific track.
+  ///
+  /// Phase 1 (Anchor Rectangle, 2026-04-19): The track is now chosen by the
+  /// player via tap-to-select (decisions table row 1: two-step B).
+  /// `_referenceCandidateBboxArea` non-null already implies a live selection
+  /// (see onResult), so the existing guard remains valid as the
+  /// "Confirm enable" signal.
   void _confirmReferenceCapture() {
     if (_referenceCandidateBboxArea == null) return;
+    if (_selectedTrackId == null) return;
+
+    // Look up the selected track in the latest ByteTrack frame. If the track
+    // disappeared between the last onResult and this Confirm tap (race
+    // window), bail out — the next onResult will clear _selectedTrackId
+    // (Decision B-i) and the player can re-tap.
+    TrackedObject? maybeSelected;
+    for (final t in _byteTracker.tracks) {
+      if (t.trackId == _selectedTrackId) {
+        maybeSelected = t;
+        break;
+      }
+    }
+    if (maybeSelected == null) return;
+    // Hoist into a final non-nullable local so promotion survives into the
+    // setState closure below.
+    final TrackedObject selected = maybeSelected;
+
     setState(() {
       _referenceBboxArea = _referenceCandidateBboxArea;
       _impactDetector.setReferenceBboxArea(_referenceBboxArea!);
@@ -527,10 +659,15 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       _calibrationMode = false;
       _pipelineLive = true;
 
-      // Lock ByteTrack onto the ball — picks the largest ball-class track
-      // (closest to camera).
-      _ballId.setReferenceTrack(_byteTracker.tracks);
-      _referenceCandidateBbox = null; // hide red bbox after confirm
+      // Lock ByteTrack onto the player-selected track.
+      _ballId.setReferenceTrack(selected);
+
+      // Clear Phase 1 reference-capture state — overlays go away, screen
+      // returns to the clean post-Confirm view (matches today's behaviour).
+      _ballCandidates = const [];
+      _selectedTrackId = null;
+      _cancelAudioNudgeTimer();
+
       print('DIAG-BYTETRACK: locked ball trackId=${_ballId.currentBallTrackId} '
           'refBboxArea=${_referenceBboxArea!.toStringAsFixed(6)}');
       // Log full calibration snapshot at pipeline start for diagnostic comparison.
@@ -591,20 +728,57 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
               );
 
               setState(() {
-                // 3. Reference capture: find largest ball-class track for bbox area.
+                // 3. Reference capture (Phase 1, 2026-04-19):
+                //    - Collect ALL ball-class tracked candidates (not just largest)
+                //    - Run aliveness check on the player's tap selection (B-i)
+                //    - Drive Confirm-button enable via _referenceCandidateBboxArea
+                //      (kept as the single source of truth for the existing
+                //       enable condition; no downstream consumer changes).
+                //    - Manage State 1↔State 2 audio nudge timer transitions.
                 if (_awaitingReferenceCapture) {
+                  final hadCandidates = _ballCandidates.isNotEmpty;
+
                   final ballTracks = tracks
                       .where((t) =>
                           _ballClassNames.contains(t.className) &&
                           t.state == TrackState.tracked)
                       .toList();
-                  if (ballTracks.isNotEmpty) {
-                    ballTracks.sort((a, b) => b.bboxArea.compareTo(a.bboxArea));
-                    _referenceCandidateBboxArea = ballTracks.first.bboxArea;
-                    _referenceCandidateBbox = ballTracks.first.bbox;
+
+                  _ballCandidates = [
+                    for (final t in ballTracks)
+                      (trackId: t.trackId, bbox: t.bbox),
+                  ];
+
+                  // Aliveness check (Decision B-i): if the previously tapped
+                  // track is no longer present, clear selection.
+                  if (_selectedTrackId != null &&
+                      !_ballCandidates
+                          .any((c) => c.trackId == _selectedTrackId)) {
+                    _selectedTrackId = null;
+                  }
+
+                  // _referenceCandidateBboxArea drives both the prompt text
+                  // colour and the Confirm-button enable. With Phase 1 it
+                  // mirrors the SELECTED track's bbox area (not the largest).
+                  if (_selectedTrackId != null) {
+                    final selected = ballTracks.firstWhere(
+                      (t) => t.trackId == _selectedTrackId,
+                    );
+                    _referenceCandidateBboxArea = selected.bboxArea;
                   } else {
                     _referenceCandidateBboxArea = null;
-                    _referenceCandidateBbox = null;
+                  }
+
+                  // State 1 → State 2 transition: candidates appeared this
+                  // frame. Restart the audio nudge timer from zero (decision
+                  // table row 7: 30 s grace before first nudge).
+                  final hasCandidates = _ballCandidates.isNotEmpty;
+                  if (!hadCandidates && hasCandidates) {
+                    _startAudioNudgeTimer();
+                  } else if (hadCandidates && !hasCandidates) {
+                    // State 2 → State 1 transition: candidates disappeared.
+                    // Cancel any in-flight nudge; will restart on next 1→2.
+                    _cancelAudioNudgeTimer();
                   }
                 }
 
@@ -834,28 +1008,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
               ),
             ),
 
-          // Back button badge.
-          Positioned(
-            top: 12,
-            left: 12,
-            child: GestureDetector(
-              onTap: () => Navigator.of(context).pop(),
-              child: Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: const Icon(
-                  Icons.arrow_back,
-                  color: Colors.white,
-                  size: 22,
-                ),
-              ),
-            ),
-          ),
-
           // Share Log button — visible once a session has started.
           if (DiagnosticLogger.instance.filePath != null)
             Positioned(
@@ -1021,14 +1173,25 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
+                  // Phase 1 (Anchor Rectangle, 2026-04-19): three reference-
+                  // capture states (decisions table rows 4-6):
+                  //   State 1 — no candidates: S1-a "Place ball at kick…"
+                  //   State 2 — candidates, none selected: "Tap the ball…"
+                  //   State 3 — selection live: "Tap Confirm to proceed…"
+                  // Outside the awaiting sub-phase, the calibration text is
+                  // unchanged.
                   _awaitingReferenceCapture
-                      ? (_referenceCandidateBboxArea != null
-                          ? 'Ball detected \u2014 tap Confirm'
-                          : 'Place ball on target \u2014 point camera at ball')
+                      ? (_ballCandidates.isEmpty
+                          ? 'Place ball at kick position, keep it in camera view.'
+                          : (_selectedTrackId != null &&
+                                  _referenceCandidateBboxArea != null
+                              ? 'Tap Confirm to proceed with selected ball.'
+                              : 'Tap the ball you want to use'))
                       : 'Tap corner ${_cornerPoints.length + 1} of 4: '
                           '${_cornerLabels[_cornerPoints.length]}',
                   style: TextStyle(
                     color: _awaitingReferenceCapture &&
+                            _selectedTrackId != null &&
                             _referenceCandidateBboxArea != null
                         ? Colors.greenAccent
                         : Colors.white,
@@ -1050,6 +1213,11 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                 );
                 return GestureDetector(
                   behavior: HitTestBehavior.translucent,
+                  // Phase 1 (Anchor Rectangle, 2026-04-19): Gesture-1 —
+                  // trust Flutter's gesture arena. onTapUp + onPanStart
+                  // coexist on the same detector. Tap-up without movement
+                  // = ball select; movement = corner drag.
+                  onTapUp: (details) => _handleBallTap(details, canvasSize),
                   onPanStart: (details) {
                     final normalized = YoloCoordUtils.fromCanvasPixel(
                       details.localPosition,
@@ -1089,10 +1257,14 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
               },
             ),
 
-          // Red bounding box around the detected ball candidate during
-          // reference capture. Lets the user verify the correct object
-          // is selected before tapping Confirm.
-          if (_awaitingReferenceCapture && _referenceCandidateBbox != null)
+          // Red/green bounding boxes around all ball candidates during
+          // reference capture. Each candidate is red unless it is the
+          // player-tapped selection, which is green. Lets the player verify
+          // which ball is currently selected before tapping Confirm.
+          //
+          // IgnorePointer keeps tap events flowing to the underlying
+          // GestureDetector (corner drag + ball tap).
+          if (_awaitingReferenceCapture && _ballCandidates.isNotEmpty)
             LayoutBuilder(
               builder: (context, constraints) {
                 final canvasSize = Size(
@@ -1103,7 +1275,13 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                   child: CustomPaint(
                     size: canvasSize,
                     painter: _ReferenceBboxPainter(
-                      bbox: _referenceCandidateBbox!,
+                      bboxes: [
+                        for (final c in _ballCandidates)
+                          (
+                            bbox: c.bbox,
+                            isSelected: c.trackId == _selectedTrackId,
+                          ),
+                      ],
                       cameraAspectRatio: 4.0 / 3.0,
                     ),
                   ),
@@ -1153,6 +1331,39 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
             ),
           ),
 
+          // Back button badge.
+          //
+          // Z-order note (2026-04-19): Rendered AFTER both full-screen
+          // GestureDetectors (calibration corner-tap collector at line ~1171
+          // and the awaiting-reference-capture detector at line ~1232) so
+          // that the gesture arena resolves taps in the badge area to this
+          // button instead of the underlying full-screen handlers. Without
+          // this ordering, taps on the badge during calibration / awaiting
+          // sub-phase were consumed by the full-screen detectors (which
+          // wins arena ties as the later-registered widget) — back was
+          // unreachable AND a phantom corner was placed under the badge.
+          // Sits below the rotate overlay (which is intentionally topmost).
+          Positioned(
+            top: 12,
+            left: 12,
+            child: GestureDetector(
+              onTap: () => Navigator.of(context).pop(),
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Icon(
+                  Icons.arrow_back,
+                  color: Colors.white,
+                  size: 22,
+                ),
+              ),
+            ),
+          ),
+
           // Rotate-to-landscape overlay (topmost layer).
           // Blocks all interaction until device is physically in landscape.
           if (_showRotateOverlay)
@@ -1192,6 +1403,10 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   void dispose() {
     _rotationTimer?.cancel();
     _accelSubscription?.cancel();
+    // Phase 1 (Anchor Rectangle, 2026-04-19): cancel the audio nudge timer
+    // so a stale Timer cannot survive hot-reload / screen pop and fire
+    // playTapPrompt against a disposed AudioService.
+    _cancelAudioNudgeTimer();
     _byteTracker.reset();
     _ballId.reset();
     _impactDetector.forceReset();
@@ -1210,15 +1425,30 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   }
 }
 
-/// Paints a red bounding box around the reference ball candidate during
-/// calibration. Uses [YoloCoordUtils.toCanvasPixel] to convert normalized
-/// bbox corners to canvas pixels with FILL_CENTER crop correction.
+/// Paints bounding boxes around reference ball candidates during the
+/// awaiting-reference-capture sub-phase. Each entry is rendered red unless
+/// it is the player-selected entry, which is rendered green.
+///
+/// Phase 1 (Anchor Rectangle, 2026-04-19): extended from a single-bbox
+/// painter to a list-of-bboxes painter to support multi-ball display +
+/// tap-to-select. Same `YoloCoordUtils.toCanvasPixel` conversion and same
+/// stroke style (2.5 px) as the prior single-bbox painter — only the loop
+/// + per-item colour pick are new.
 class _ReferenceBboxPainter extends CustomPainter {
-  final Rect bbox;
+  /// Each entry: a bbox in normalized [0,1] coords + whether it is the
+  /// currently selected candidate (green) or unselected (red).
+  final List<({Rect bbox, bool isSelected})> bboxes;
   final double cameraAspectRatio;
 
+  // Reused colour constants — red matches the previous single-bbox painter
+  // colour so unselected appearance is unchanged. Green matches the
+  // greenAccent used by the prompt text + Confirm button when the user is
+  // ready to commit, keeping the visual language consistent.
+  static const _redStroke = Color(0xFFFF0000);
+  static const _greenStroke = Color(0xFF00E676); // Colors.greenAccent[400]
+
   _ReferenceBboxPainter({
-    required this.bbox,
+    required this.bboxes,
     required this.cameraAspectRatio,
   });
 
@@ -1226,29 +1456,38 @@ class _ReferenceBboxPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (size.isEmpty) return;
 
-    final topLeft = YoloCoordUtils.toCanvasPixel(
-      Offset(bbox.left, bbox.top),
-      size,
-      cameraAspectRatio,
-    );
-    final bottomRight = YoloCoordUtils.toCanvasPixel(
-      Offset(bbox.right, bbox.bottom),
-      size,
-      cameraAspectRatio,
-    );
-
     final paint = Paint()
-      ..color = const Color(0xFFFF0000) // red
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.5;
 
-    canvas.drawRect(
-      Rect.fromPoints(topLeft, bottomRight),
-      paint,
-    );
+    for (final entry in bboxes) {
+      final topLeft = YoloCoordUtils.toCanvasPixel(
+        Offset(entry.bbox.left, entry.bbox.top),
+        size,
+        cameraAspectRatio,
+      );
+      final bottomRight = YoloCoordUtils.toCanvasPixel(
+        Offset(entry.bbox.right, entry.bbox.bottom),
+        size,
+        cameraAspectRatio,
+      );
+      paint.color = entry.isSelected ? _greenStroke : _redStroke;
+      canvas.drawRect(
+        Rect.fromPoints(topLeft, bottomRight),
+        paint,
+      );
+    }
   }
 
   @override
-  bool shouldRepaint(covariant _ReferenceBboxPainter oldDelegate) =>
-      bbox != oldDelegate.bbox;
+  bool shouldRepaint(covariant _ReferenceBboxPainter oldDelegate) {
+    if (bboxes.length != oldDelegate.bboxes.length) return true;
+    for (int i = 0; i < bboxes.length; i++) {
+      if (bboxes[i].bbox != oldDelegate.bboxes[i].bbox ||
+          bboxes[i].isSelected != oldDelegate.bboxes[i].isSelected) {
+        return true;
+      }
+    }
+    return false;
+  }
 }
