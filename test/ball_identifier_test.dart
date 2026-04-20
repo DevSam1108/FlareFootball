@@ -36,50 +36,46 @@ TrackedObject _track({
 
 void main() {
   group('BallIdentifier - setReferenceTrack', () {
-    test('selects the largest ball-class track as the ball', () {
+    // Phase 1 (Anchor Rectangle, 2026-04-19): setReferenceTrack now takes a
+    // single TrackedObject chosen by the player via tap-to-select. The
+    // previous "auto-pick largest" / class-filter / static-bypass logic has
+    // moved up to the screen layer (which handles candidate filtering and
+    // tap resolution), so the tests that exercised those behaviours are no
+    // longer applicable to BallIdentifier. The tests below cover the new
+    // contract: lock onto whichever track the caller passed in.
+
+    test('locks onto the passed track id and records its bbox area', () {
       final bi = BallIdentifier();
-      final tracks = [
-        _track(id: 1, cx: 0.3, cy: 0.4, w: 0.028, h: 0.028, className: 'ball'),
-        _track(id: 2, cx: 0.5, cy: 0.7, w: 0.065, h: 0.065),
-        _track(id: 3, cx: 0.4, cy: 0.45, w: 0.030, h: 0.030, className: 'ball'),
-      ];
-      bi.setReferenceTrack(tracks);
-      expect(bi.currentBallTrackId, 2);
-      expect(bi.lastBallBboxArea, closeTo(0.065 * 0.065, 0.0001));
+      final chosen = _track(id: 7, cx: 0.4, cy: 0.6, w: 0.05, h: 0.05);
+      bi.setReferenceTrack(chosen);
+      expect(bi.currentBallTrackId, 7);
+      expect(bi.currentBallTrack, chosen);
+      expect(bi.lastBallPosition, const Offset(0.4, 0.6));
+      expect(bi.lastBallBboxArea, closeTo(0.05 * 0.05, 0.0001));
     });
 
-    test('accepts static tracks during reference capture (ball may be stationary)', () {
+    test('locks regardless of bbox size (selection is the caller\'s job)', () {
       final bi = BallIdentifier();
-      final tracks = [
-        _track(id: 1, w: 0.10, h: 0.10, isStatic: true), // largest, even though static
-        _track(id: 2, w: 0.05, h: 0.05),
-      ];
-      bi.setReferenceTrack(tracks);
-      // During reference capture, static flag is ignored — largest bbox wins
+      // A small/distant ball can be locked just as well as a large one —
+      // BallIdentifier no longer prefers larger bboxes.
+      final small = _track(id: 3, w: 0.02, h: 0.02);
+      bi.setReferenceTrack(small);
+      expect(bi.currentBallTrackId, 3);
+    });
+
+    test('a second call replaces the prior selection', () {
+      final bi = BallIdentifier();
+      bi.setReferenceTrack(_track(id: 1, w: 0.05, h: 0.05));
       expect(bi.currentBallTrackId, 1);
-    });
-
-    test('ignores non-ball class tracks', () {
-      final bi = BallIdentifier();
-      final tracks = [
-        _track(id: 1, w: 0.10, h: 0.10, className: 'person'),
-        _track(id: 2, w: 0.05, h: 0.05, className: 'Soccer ball'),
-      ];
-      bi.setReferenceTrack(tracks);
-      expect(bi.currentBallTrackId, 2);
-    });
-
-    test('does nothing if no ball-class tracks', () {
-      final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, className: 'person')]);
-      expect(bi.currentBallTrackId, isNull);
+      bi.setReferenceTrack(_track(id: 9, w: 0.06, h: 0.06));
+      expect(bi.currentBallTrackId, 9);
     });
   });
 
   group('BallIdentifier - track following', () {
     test('follows current track ID across frames', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 5, cx: 0.2, cy: 0.7, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 5, cx: 0.2, cy: 0.7, w: 0.06, h: 0.06));
 
       for (var i = 0; i < 10; i++) {
         bi.updateFromTracks([
@@ -92,7 +88,7 @@ void main() {
 
     test('maintains ball when other tracks appear and disappear', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 3, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 3, w: 0.06, h: 0.06));
 
       bi.updateFromTracks([
         _track(id: 3, cx: 0.3, cy: 0.5, vx: 0.01, vy: -0.01),
@@ -112,7 +108,7 @@ void main() {
   group('BallIdentifier - re-acquisition', () {
     test('re-acquires when track removed and new moving track appears', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, cx: 0.3, cy: 0.5, vx: 0.03, vy: -0.02)]);
 
       bi.updateFromTracks([
@@ -129,7 +125,7 @@ void main() {
 
     test('re-acquires by proximity when no moving tracks', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, cx: 0.2, cy: 0.7, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, cx: 0.2, cy: 0.7, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, cx: 0.2, cy: 0.7)]);
 
       bi.updateFromTracks([
@@ -141,7 +137,7 @@ void main() {
 
     test('static tracks ignored during re-acquisition', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, cx: 0.2, cy: 0.7, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, cx: 0.2, cy: 0.7, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, cx: 0.2, cy: 0.7)]);
 
       bi.updateFromTracks([
@@ -154,7 +150,7 @@ void main() {
   group('BallIdentifier - ball lost badge', () {
     test('isBallLost triggers after 3 missed frames', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1)]);
       expect(bi.isBallLost, isFalse);
 
@@ -168,7 +164,7 @@ void main() {
 
     test('isBallLost resets when ball re-detected', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1)]);
 
       for (var i = 0; i < 5; i++) {
@@ -184,7 +180,7 @@ void main() {
   group('BallIdentifier - trail', () {
     test('trail entries have correct TrackedPosition format', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, cx: 0.3, cy: 0.5, vx: 0.02, vy: -0.01)]);
 
       expect(bi.trail.length, 1);
@@ -197,7 +193,7 @@ void main() {
 
     test('trail grows with ball movement', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
 
       for (var i = 0; i < 5; i++) {
         bi.updateFromTracks([
@@ -209,7 +205,7 @@ void main() {
 
     test('trail adds occlusion sentinel when ball lost', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, cx: 0.3, cy: 0.5)]);
 
       for (var i = 0; i < 7; i++) {
@@ -221,7 +217,7 @@ void main() {
 
     test('trail auto-resets after 30 missed frames', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, cx: 0.3, cy: 0.5)]);
 
       // Lose for exactly 30 frames to trigger auto-reset
@@ -236,14 +232,14 @@ void main() {
   group('BallIdentifier - velocity and smoothedPosition', () {
     test('velocity returns current ball track velocity', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, vx: 0.03, vy: -0.02)]);
       expect(bi.velocity, const Offset(0.03, -0.02));
     });
 
     test('smoothedPosition returns current ball center', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, cx: 0.4, cy: 0.6)]);
       expect(bi.smoothedPosition, const Offset(0.4, 0.6));
     });
@@ -257,7 +253,7 @@ void main() {
   group('BallIdentifier - reset', () {
     test('reset clears all state', () {
       final bi = BallIdentifier();
-      bi.setReferenceTrack([_track(id: 1, w: 0.06, h: 0.06)]);
+      bi.setReferenceTrack(_track(id: 1, w: 0.06, h: 0.06));
       bi.updateFromTracks([_track(id: 1, cx: 0.3, cy: 0.5)]);
 
       bi.reset();
