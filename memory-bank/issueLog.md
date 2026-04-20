@@ -4,6 +4,39 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 ---
 
+## ISSUE-031: Back Button Unreachable During Calibration Mode + Awaiting Reference Capture (Z-Order Bug)
+
+**Date:** 2026-04-19
+**Platform:** iOS (iPhone 12) — reported + verified on device
+**Symptom:** Two related bugs uncovered during Phase 1 review:
+1. **Calibration mode (corners 0-3 tapped):** Tapping the top-left back-button badge places a calibration corner at the badge's location instead of popping the screen. The button is visually present but unreachable.
+2. **Awaiting reference capture (4 corners done, before tap-to-lock):** Same — tapping the back-button badge does nothing. A Phase 1 regression: before Phase 1, that state's full-screen `GestureDetector` had only `onPanStart/Update/End`; Phase 1 added `onTapUp` for ball selection, which introduced a tap recognizer that competes with the back-button's `onTap`.
+
+**Root Cause:** Flutter's gesture arena resolves competing tap recognizers by registration order — the widget rendered LATER in the Stack wins. In the live-detection screen's Stack, the back-button `Positioned` block was rendered at line ~1015, BEFORE two full-screen `GestureDetector`s:
+- Line ~1171 — calibration corner-tap collector (`onTapDown`)
+- Line ~1232 — awaiting-reference-capture detector (`onPanStart/Update/End` + Phase 1's new `onTapUp`)
+
+Both use `HitTestBehavior.translucent`, which controls visual hit-test propagation but does NOT stop the gesture arena from picking one winner. Since both full-screen detectors were registered later than the back button, they consumed every tap — including taps on the back-button area — regardless of visual overlap.
+
+**Evidence:** User tapped the back-button badge during corner-tap calibration and a phantom corner was placed at the badge's location. Same during awaiting reference capture, but there the Phase 1 `onTapUp` consumed the tap (ball-selection logic ran with a no-op because no candidate was near that coordinate).
+
+**Fix:** Single `Positioned` widget moved in `live_object_detection_screen.dart`. The back-button block now renders AFTER both full-screen `GestureDetector`s but BEFORE the rotate-to-landscape overlay (which stays topmost). Z-order change only — visually identical (still 40×40 black circle, top-left). Gesture arena now resolves taps in the badge area to the back button as intended.
+
+**Side Benefit:** No phantom corner can be placed at the back-button's location during calibration, because the back button now consumes the tap before the corner detector sees it.
+
+**Drive-by cleanup:** Removed the now-unused legacy `_referenceCandidateBbox` field (1 declaration + 2 dead `= null` writes) during the same edit.
+
+**Status:** ✅ FIXED (2026-04-19). iOS device-verified on iPhone 12. Android verification pending.
+
+**Related:** ADR-074 (Back-button z-order via Stack re-ordering), ADR-073 (Phase 1 Anchor Rectangle tap-to-lock design — introduced the `onTapUp` regression).
+
+**Lessons:**
+1. **Full-screen `GestureDetector`s must be layered carefully.** Every interactive widget rendered earlier than a full-screen detector is visually present but gesture-inaccessible.
+2. **`HitTestBehavior.translucent` ≠ "taps pass through to both widgets."** The arena still picks one winner per gesture. Translucent only controls hit-test *propagation* for bounding purposes, not gesture-winner resolution.
+3. **When adding a tap recognizer (`onTap`/`onTapUp`/`onTapDown`) to an existing full-screen detector, audit every earlier-rendered tappable widget** to see if it's now unreachable. Drag-only handlers (`onPanStart/...`) don't compete with taps, so adding a tap recognizer can silently break existing buttons.
+
+---
+
 ## ISSUE-030: Session Lock Stuck ON After Bounce-Back False Kick
 
 **Date:** 2026-04-15

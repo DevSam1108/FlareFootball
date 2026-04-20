@@ -15,8 +15,8 @@
 - ✅ GSD planning infrastructure: `.planning/` with `ROADMAP.md`, `REQUIREMENTS.md`, `MILESTONES.md`, `STATE.md`, `PROJECT.md`
 
 ### Code Quality
-- ✅ `flutter analyze` -- 0 errors, 0 warnings, 84 infos
-- ✅ `flutter test` -- 176/176 passing (3 widget/DetectorConfig + 16 Kalman + 8 BallTracker + 7 trajectory + 8 homography + 10 zone mapper + 4 coord utils + 22 impact detector + 3 audio service + 15 kick detector + 12 wall_plane_predictor + 29 bytetrack + 19 ball_identifier)
+- ✅ `flutter analyze` -- 0 errors, 0 warnings, 85 infos (2026-04-19 after full /update-memory verification run; infos are all pre-existing style lints in services/tests plus the intentional `print` stub in `audio_service.playTapPrompt`)
+- ✅ `flutter test` -- 175/175 passing (2026-04-19; was 176, net −1 from rewriting 4 obsolete `BallIdentifier.setReferenceTrack` auto-pick-largest tests into 3 new contract tests for the new `setReferenceTrack(TrackedObject)` API introduced in Anchor Rectangle Phase 1)
 - ✅ `withOpacity()` replaced with `withValues(alpha:)` (deprecated API migration)
 - ✅ DIAG-02/03/04/05 temporary diagnostic print statements removed (2026-03-09)
 - ✅ Diagnostic `print()` statements in `ImpactDetector._makeDecision()` intentionally retained for real-world testing analysis
@@ -251,6 +251,46 @@
 - 2 remaining failures: both had only 1 tracking frame (very fast kicks)
 - **Outdoor test (2026-03-20):** iOS showed wrong zones (extrapolation predicted zone 8, ball hit zone 5). Android couldn't detect any hits at all. Led to ADR-051 (depth-verified direct zone mapping).
 - **Next: real-world outdoor test on both devices with depth-verified direct zone mapping**
+
+---
+
+## Anchor Rectangle Feature (designed 2026-04-17)
+
+### Phase 1 — Tap-to-Lock Interaction
+✅ **Status:** CODE COMPLETE + iOS DEVICE-VERIFIED (2026-04-19). Tested on iPhone 12 — tap-to-lock flow + back button fix both working. Android (Realme 9 Pro+) verification still pending. 175/175 tests passing. `flutter analyze` 0 errors.
+
+- **Replaces:** Auto-pick-largest reference capture with explicit player tap-to-select. Two-step UX retained (tap → green box → Confirm commits).
+- **Files touched:** `live_object_detection_screen.dart`, `services/ball_identifier.dart`, `services/audio_service.dart`, `test/ball_identifier_test.dart`. No new files.
+- **Key changes:**
+  - `BallIdentifier.setReferenceTrack(List<TrackedObject>)` → `setReferenceTrack(TrackedObject)`. Caller is now responsible for filtering & selection.
+  - Multi-bbox painter (`_ReferenceBboxPainter`) — every ball-class tracked candidate gets a red bbox; the player-selected one is green.
+  - `_findNearestBall` + `_handleBallTap` — Tap-2 rule (inside-bbox direct hit always wins; else nearest-by-center within `_dragHitRadius = 0.09`).
+  - `onTapUp` added to existing GestureDetector alongside `onPanStart/Update/End` (Gesture-1: trust the gesture arena).
+  - Audio nudge timer (`Audio-2`: 30s grace, 10s repeat, State 2 only). Stub `AudioService.playTapPrompt` prints `AUDIO-STUB:` until Phase 5 records the asset.
+  - Prompt text now 3-state: S1-a → "Tap the ball you want to use" → "Tap Confirm to proceed with selected ball" (greenAccent in State 3).
+  - `_startCalibration` (Recal-1) clears tap selection + cancels nudge timer; `dispose` cancels nudge timer.
+- **What is NOT yet done:** Anchor rectangle drawing (Phase 2), filter (Phase 3), return-to-anchor cycle (Phase 4), real audio asset (Phase 5).
+- **On-device verification checklist:** see `memory-bank/activeContext.md` "Verification still required (on-device)" subsection.
+
+#### Audio nudge counter + timestamp (2026-04-19, follow-up to Phase 1)
+- Made the audio nudge stub self-verifying so on-device testing of the 30 s grace + 10 s repeat cadence can be confirmed from the device log alone (no wrist watch needed) while real audio remains Phase 5.
+- `AudioService` gained `_tapPromptCallCount` field + `resetTapPromptCounter()` method. `playTapPrompt()` now prints `AUDIO-STUB #N: Tap the ball to continue (HH:MM:SS.mmm)` instead of a repeating identical line.
+- `_startAudioNudgeTimer` calls `resetTapPromptCounter()` so every new State 2 episode visibly restarts the counter at `#1`.
+- 175/175 tests still passing; analyzer clean.
+
+#### Back-button z-order fix (2026-04-19, follow-up to Phase 1)
+- Moved back button `Positioned` block to render after both full-screen `GestureDetector`s but before the rotate overlay. Closes two bugs in one move:
+  1. Pre-existing: back button unreachable during corner-tap calibration mode (corner detector won gesture arena).
+  2. Phase 1 regression: back button unreachable during awaiting reference capture (Phase 1 added `onTapUp` to that detector, which competed with the back button's `onTap`).
+- Side benefit: no phantom corner can be placed under the back button during calibration.
+- Drive-by cleanup: deleted now-unused `_referenceCandidateBbox` field (1 declaration + 2 dead `= null` writes).
+- 175/175 tests still passing; analyzer clean.
+
+### Phase 2-5 — Pending
+- Phase 2: Anchor Rectangle Computation & Display — not started
+- Phase 3: Rectangle Filter During Waiting State — not started
+- Phase 4: Return-to-Anchor After Decision — not started
+- Phase 5: Audio Announcements & Edge Cases — not started
 
 ---
 

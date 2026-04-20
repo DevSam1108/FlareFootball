@@ -2,6 +2,48 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## Anchor Rectangle Phase 1 — Tap-to-Lock + Back-Button Z-Order Fix + Audio Counter (2026-04-19)
+
+### Summary
+Implemented Phase 1 of the Anchor Rectangle feature — replaced the auto-pick-largest reference-capture heuristic with explicit player tap-to-select. Two-step UX retained (tap a red bbox → turns green → Confirm commits). All 12 design decisions agreed up front via the brainstorming skill and recorded in `memory-bank/anchor-rectangle-feature-plan.md`. Fixed two back-button z-order bugs discovered during review (one pre-existing in calibration mode, one Phase 1 regression in awaiting-reference-capture) with a single `Positioned` widget move. Added a per-episode counter + timestamp to the audio nudge stub so the 30 s grace + 10 s repeat cadence is verifiable from device logs alone while the real audio asset is deferred to Phase 5. iOS (iPhone 12) device verification passed end-to-end; Android (Realme 9 Pro+) pending.
+
+### Modified Files
+- **`lib/services/ball_identifier.dart`** — `setReferenceTrack(List<TrackedObject>)` → `setReferenceTrack(TrackedObject)`. Removed in-method filter/sort/take-largest block. Caller (screen) is now responsible for filtering and selecting the tapped track. Doc comment updated.
+- **`lib/services/audio_service.dart`** — Added `_tapPromptCallCount` field, `resetTapPromptCounter()` method, and `playTapPrompt()` stub that prints `AUDIO-STUB #N: Tap the ball to continue (HH:MM:SS.mmm)`. Real audio asset is deferred to Phase 5.
+- **`lib/screens/live_object_detection/live_object_detection_screen.dart`** —
+  - New state: `_ballCandidates` (list of `(trackId, bbox)`), `_selectedTrackId` (int?), `_audioNudgeTimer` (Timer?).
+  - `_ReferenceBboxPainter` refactored from single-bbox to multi-bbox with per-item red/green colour.
+  - `onResult`: collects ALL ball-class tracked candidates, runs aliveness check on `_selectedTrackId`, drives State 1↔2 audio-timer transitions, `_referenceCandidateBboxArea` now mirrors the SELECTED track.
+  - New `_findNearestBall` (mirrors `_findNearestCorner`) + `_handleBallTap` (Tap-2 rule, last-tap-wins).
+  - New `_startAudioNudgeTimer` / `_cancelAudioNudgeTimer` (30 s grace + 10 s repeat, resets AudioService counter on start).
+  - `onTapUp` added to existing GestureDetector alongside `onPanStart/Update/End` (Gesture-1: trust the gesture arena).
+  - Prompt text extended to 3-state ternary (S1-a / "Tap the ball you want to use" / "Tap Confirm to proceed with selected ball").
+  - `_confirmReferenceCapture` resolves `_selectedTrackId` → `TrackedObject` before calling the new `setReferenceTrack(track)` API. Bails safely on race-window disappearance.
+  - `_startCalibration` (Recal-1): clears tap selection + cancels nudge timer. `dispose`: cancels nudge timer.
+  - **Back button `Positioned` block moved** from early Stack position (line ~1015) to just before the rotate overlay. Z-order change only; visually identical. Closes ISSUE-031 (calibration-mode + awaiting-reference-capture back-button unreachability).
+  - **Drive-by cleanup:** removed unused legacy field `_referenceCandidateBbox` (1 declaration + 2 dead `= null` writes).
+- **`test/ball_identifier_test.dart`** — Rewrote 4 obsolete auto-pick-largest tests as 3 new contract tests for the new `setReferenceTrack(TrackedObject)` signature. Updated 14 other call sites from `[_track(...)]` to `_track(...)`. 18/18 tests in this file pass.
+- **`memory-bank/anchor-rectangle-feature-plan.md`** — Phase 1 section rewritten with 12-row Resolved Decisions table, 4-state Player Flow walkthrough, corrected change-summary table, resolved open-questions section, design notes subsection.
+
+### Verification
+```
+$ flutter analyze  -- 0 errors, 0 warnings, 85 infos
+$ flutter test     -- 175/175 passing
+```
+Net test count −1 from 176: 4 obsolete auto-pick tests rewritten as 3 new contract tests.
+
+### Device Test Results
+- **iOS (iPhone 12) — PASSED 2026-04-19:** Phase 1 tap-to-lock flow end-to-end. Back button works in calibration mode, awaiting reference capture, and live pipeline.
+- **Android (Realme 9 Pro+) — pending.**
+
+### Related Artifacts
+- **ISSUE-031** added to `issueLog.md` — back-button z-order bugs + fix
+- **ADR-073** added to `decisionLog.md` — Phase 1 Anchor Rectangle tap-to-lock design (covers 12 design choices)
+- **ADR-074** added to `decisionLog.md` — Back-button z-order via Stack re-ordering
+- **ADR-075** added to `decisionLog.md` — Audio nudge stub with per-episode counter + timestamp for log-based verification
+
+---
+
 ## Mahalanobis Area Ratio Fix + UI Refinements (2026-04-16)
 
 ### Summary

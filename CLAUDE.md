@@ -131,9 +131,11 @@ The `LiveObjectDetectionScreen` forces landscape orientation in `initState` and 
 | Snackbar service | `lib/services/snackbar_service.dart` |
 | Android rotation channel | `android/app/.../MainActivity.kt` |
 | Issue log | `memory-bank/issueLog.md` |
+| Decision log (ADRs) | `memory-bank/decisionLog.md` |
 | Field test analysis (2026-04-04) | `memory-bank/field-test-analysis-2026-04-04.md` |
+| **Anchor Rectangle feature plan (NEW 2026-04-17)** | `memory-bank/anchor-rectangle-feature-plan.md` — full 5-phase design doc; Phase 1 implemented 2026-04-19 |
 | Pre-change code snapshots | `memory-bank/snapshots/` (backup copies before risky edits) |
-| **Debug bbox overlay (NEW)** | `lib/screens/live_object_detection/widgets/debug_bbox_overlay.dart` |
+| **Debug bbox overlay** | `lib/screens/live_object_detection/widgets/debug_bbox_overlay.dart` |
 
 ---
 
@@ -238,8 +240,14 @@ The following require explicit discussion before changes are made:
 | **2-layer false positive filter (ISSUE-028)** | **❌ REVERTED (2026-04-13)** | **DetectionFilter + TrackQualityGate + Mahalanobis rescue validation. Init delay broke BallIdentifier re-acquisition. Player head (ar:0.9) unfilterable with geometry. Must implement ONE filter at a time. Start with Mahalanobis rescue validation only.** |
 | **~~Bbox area ratio check too aggressive (ISSUE-029)~~** | **✅ FIXED (2026-04-16)** | **Last-measured-area with 2.0/0.3 threshold. Uses real measurement instead of drifting Kalman predicted area. 5/5 kicks across 3 test runs. See ADR-072.** |
 | **Session lock stuck ON (ISSUE-030)** | **🔴 OPEN** | **Bounce-back triggers false kick → session lock activates → ball lost → lock never releases (no decision made). Needs safety timeout.** |
+| **~~Back button unreachable during calibration / awaiting reference capture (ISSUE-031)~~** | **✅ FIXED (2026-04-19)** | **Z-order bug: back-button `Positioned` block rendered BEFORE two full-screen `GestureDetector`s, so the arena claimed taps on the button. Fixed by moving the `Positioned` block to render AFTER both detectors (before rotate overlay). iOS-verified on iPhone 12. See ADR-074, ISSUE-031.** |
 
 > **Full issue history:** See `memory-bank/issueLog.md` for all issues with root causes and verified solutions.
+
+### Active feature branch — Anchor Rectangle (2026-04-17 onwards)
+Phase 1 (Tap-to-Lock Interaction) implemented 2026-04-19. iOS-verified. Android pending. Phases 2–5 not started. See `memory-bank/anchor-rectangle-feature-plan.md` for the full 5-phase design, `memory-bank/decisionLog.md` ADR-073 for the 12 Phase 1 design decisions.
+
+Key API change from Phase 1: `BallIdentifier.setReferenceTrack(List<TrackedObject>)` → `setReferenceTrack(TrackedObject)`. The caller (screen) now filters and selects; `BallIdentifier` just locks onto whatever track it receives. If adding new call sites, pass a single `TrackedObject`, not a list.
 
 ---
 

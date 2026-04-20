@@ -1155,5 +1155,72 @@
 
 ---
 
+## Anchor Rectangle Feature — Phase 1 (2026-04-17 design / 2026-04-19 implementation)
+
+### ADR-073: Phase 1 Anchor Rectangle — Tap-to-Lock Reference Capture Design
+
+- **Date:** 2026-04-17 (design) / 2026-04-19 (implementation)
+- **Context:** Ground testing on 2026-04-17 revealed that false positives on non-ball objects (orange cones, player body parts, target-sheet circles) are the dominant source of accuracy loss. Design goal: eliminate false positives by restricting detection to a player-defined anchor zone on the ground, so the app only ever tracks the one ball the player has chosen for the session. Phase 1 lays the foundation — the tap-to-lock handshake — without touching the detection pipeline yet.
+- **Options Considered (the 12 design axes, all debated with user before implementation):**
+  1. **Lock flow:** (A) tap commits directly, (B) two-step tap-selects-then-Confirm-commits, (C) tap commits but allows re-tap until kick. Chose **B** — two-step.
+  2. **Visual differentiation:** (α) red/green colour swap, (β) red/green + thicker stroke + checkmark badge, (γ) hide unselected after tap. Chose **α** — simple colour swap.
+  3. **Tap target:** (Tap-1) strict inside-bbox only, (Tap-2) inside-bbox OR within `_dragHitRadius`, (Tap-3) always nearest. Chose **Tap-2** — forgiving with radius limit.
+  4. **State 1 prompt text:** Chose "Place ball at kick position, keep it in camera view." (S1-a).
+  5. **State 2 prompt text:** "Tap the ball you want to use".
+  6. **State 3 prompt text:** "Tap Confirm to proceed with selected ball."
+  7. **Audio nudge cadence:** (Audio-1) silent, (Audio-2) State 2 only, (Audio-3) every waiting state. Chose **Audio-2** with 30 s grace + 10 s repeat (user-directed generous timing for field conditions).
+  8. **Re-calibration behaviour:** (Recal-1) full reset, (Recal-2) keep ball lock / reset corners only, (Recal-3) ask the player. Chose **Recal-1** — full reset.
+  9. **Two-tap behaviour:** (A-i) last-tap-wins, (A-ii) first-tap-sticks-until-Confirm. Chose **A-i**.
+  10. **Selected ball disappears before Confirm:** (B-i) selection clears, (B-ii) sticky on trackID. Chose **B-i** — simpler, honest UX.
+  11. **Locked ball disappears after Confirm:** Keep today's behaviour unchanged in Phase 1; richer recovery deferred to Phase 4.
+  12. **Gesture overlap (corner drag vs ball tap):** (Gesture-1) trust Flutter's arena, (Gesture-2) explicit carve-out on corner-handle regions. Chose **Gesture-1**.
+- **Decision:** Option B + B-α + Tap-2 + S1-a + Audio-2 (30/10) + Recal-1 + A-i + B-i + Gesture-1, implemented minimally by reusing existing scaffolding (`_findNearestCorner` as template for `_findNearestBall`, existing `_ReferenceBboxPainter` extended in place, existing prompt-text ternary extended to 3 branches, existing `GestureDetector` at line 1191 augmented with `onTapUp`). `BallIdentifier.setReferenceTrack(List<TrackedObject>)` signature changed to `setReferenceTrack(TrackedObject)` — caller is now responsible for filtering and selection.
+- **Rationale:**
+  - Two-step flow (B) matches existing mental model (Confirm button already there); mis-tap recovery is cheap (re-tap) instead of expensive (re-calibrate corners).
+  - B-α is the cleanest visual swap; reuses existing greenAccent (same as Confirm-ready state) for consistency.
+  - Tap-2 matches how the same `_dragHitRadius` already works for corner-drag tolerance — no new constants.
+  - Audio-2 avoids nagging during States 1 and 3 where the player has visual cues. 30 s / 10 s is user-directed generous timing — easy to tune down later.
+  - Recal-1 keeps mental model simple: "Re-calibrate means start fresh." Other options introduce hidden coupling.
+  - A-i matches every standard UI. B-i avoids the visual lie of a green box with no underlying ball.
+  - Gesture-1 trusts Flutter's arena — tap and pan don't compete (movement → pan, no movement → tap). Works in 99% of cases; didn't consider the edge case where tap vs tap competes via stacked detectors (that blew up as ISSUE-031).
+- **Trade-offs Accepted:**
+  - `setReferenceTrack` signature change is a breaking API change (14 test call sites + 1 screen call site required updates). Acceptable because the old "auto-pick-largest" logic belonged upstream anyway (the screen knows which track the player wants).
+  - Post-Confirm ball-disappearance is unhandled in Phase 1 (same behaviour as today). Phase 4 (Return-to-Anchor) will add proper recovery.
+  - Audio is STUBBED — Phase 5 records the asset. Until then, "audio nudge" means a log print, not an audible announcement. Flagged explicitly in the on-device verification checklist.
+- **Status:** Accepted. Implemented 2026-04-19. iOS (iPhone 12) device-verified end-to-end. Android (Realme 9 Pro+) pending.
+
+---
+
+### ADR-074: Back-Button Z-Order via Stack Re-Ordering (Fix for ISSUE-031)
+
+- **Date:** 2026-04-19
+- **Context:** ISSUE-031 — the back-button badge in `live_object_detection_screen.dart` was unreachable during calibration mode and during awaiting reference capture. Two full-screen `GestureDetector`s (calibration corner-tap at line 1171; awaiting-capture at line 1232) were rendered AFTER the back button in the Stack and won the gesture arena for every tap — including taps on the back-button's bounding rect. The bug was pre-existing in calibration mode (since `onTapDown` was always present there), and a fresh Phase 1 regression in awaiting-capture mode (Phase 1 added `onTapUp` to the awaiting-capture detector for ball selection, which introduced a tap recognizer that competed with the back button's `onTap` — before Phase 1, only `onPanStart/Update/End` existed there, which don't compete with taps).
+- **Options Considered:**
+  1. **Re-order the Stack** — move the back-button `Positioned` block to render AFTER both full-screen `GestureDetector`s but BEFORE the rotate overlay (which stays topmost). One-widget move; fixes both cases in one change; zero logic change. Because the back button is now on top, it wins the gesture arena for taps in its region AND absorbs hit tests so no phantom corner is placed under it during calibration.
+  2. **Position-aware carve-out** — in `_handleCalibrationTap` and `_handleBallTap`, check if the tap lies within the back-button's bounds (top-left 12,12 + 40×40) and if so, return without consuming. Couples three widgets together and breaks if the back button moves.
+  3. **Hit-area exclusion via child Positioned + IgnorePointer** — restructure the upper detectors' children. Heavy, fragile, ugly.
+- **Decision:** Option 1 — move the back-button `Positioned` block to render after both full-screen `GestureDetector`s.
+- **Rationale:** Matches the principle "every interactive UI element rendered BEFORE a full-screen GestureDetector in the Stack is both unreachable AND visually paved over." Fixing z-order is the idiomatic Flutter solution to this class of bug. No logic change, no coupling introduced, visually identical. Also fixes the secondary complaint that the user could place a calibration corner under the back button.
+- **Trade-offs Accepted:** Must remember this pattern when adding new full-screen `GestureDetector`s in the future — any existing tappable widget rendered earlier in the Stack becomes unreachable. Documented in the `issueLog.md` "Lessons" section under ISSUE-031.
+- **Status:** Accepted. Implemented 2026-04-19. iOS device-verified on iPhone 12.
+
+---
+
+### ADR-075: Audio Nudge Stub with Per-Episode Counter + Timestamp for Log-Based Verification
+
+- **Date:** 2026-04-19
+- **Context:** Phase 1 (ADR-073) deferred the real tap-prompt audio asset to Phase 5. The minimal stub `print('AUDIO-STUB: Tap the ball to continue')` was fine for mechanical "does it fire?" verification but made cadence verification hard — every print was identical, so you couldn't tell whether the timer fired once or five times from the log alone. The user wanted to verify the 30 s grace + 10 s repeat cadence on device without wiring real audio.
+- **Options Considered:**
+  1. **Monotonic counter** — `#1, #2, #3, ...` monotonic across the whole app session. Simple, but if a State 2 → 1 → 2 transition happens mid-wait, the timer restart produces `#N` with a ~31s gap to the next fire, which looks like a broken cadence.
+  2. **Per-episode counter** — counter resets every time a new State 2 episode begins (via a `resetTapPromptCounter()` call from `_startAudioNudgeTimer`). Each fresh waiting cycle visibly starts at `#1`; the reset to `#1` is itself a signal that a state transition occurred.
+  3. **Counter + timestamp** — option 2 plus an HH:MM:SS.mmm timestamp in each line. Self-documenting — reader can compute cadence from the log alone with no wrist watch needed.
+  4. **Leave it as-is (silent repeat print)** — requires manual log-line counting.
+- **Decision:** Option 3 — per-episode counter + timestamp.
+- **Rationale:** Per-episode counter is more honest about the state machine (a `#1` is always a fresh 30 s grace; a `#N+1` is always a 10 s repeat). Timestamp removes any need for external timing instrumentation during verification. The total cost is ~10 lines across two files, fully throwaway (will be removed when Phase 5 replaces the stub with real audio).
+- **Trade-offs Accepted:** `AudioService` now has a diagnostic-only API (`resetTapPromptCounter`). Marked in doc-comments as Phase-5-removal territory.
+- **Status:** Accepted. Implemented 2026-04-19.
+
+---
+
 *Decision log created: 2026-03-13*
 *Backfilled from: activeContext.md, progress.md, systemPatterns.md, techContext.md, productContext.md, issueLog.md, changelog.md, projectbrief.md, CLAUDE.md, .planning/research/*, .planning/ROADMAP.md, .planning/REQUIREMENTS.md*
