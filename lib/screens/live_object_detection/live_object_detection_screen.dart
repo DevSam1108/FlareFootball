@@ -142,6 +142,27 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   /// a magenta dashed overlay; no filtering yet. See ADR-076.
   Rect? _anchorRectNorm;
 
+  /// Phase 3 (Anchor Rectangle): spatial filter state.
+  /// When true, raw YOLO detections whose bbox center lies outside
+  /// [_anchorRectNorm] are dropped in [_toDetections] before ByteTrack
+  /// receives them. Set true at lock, false on kick start, re-armed on
+  /// decision or safety timeout. Field unused until Steps 2–5 wire it.
+  bool _anchorFilterActive = false;
+
+  /// Phase 3 safety timeout — if a kick is confirmed but no decision
+  /// fires within 2 s, this timer re-arms the filter and releases the
+  /// session lock so the pipeline recovers from stuck-lock scenarios
+  /// (ISSUE-030). Null when no kick is in flight.
+  Timer? _safetyTimeoutTimer;
+
+  /// Phase 5 (Anchor Rectangle, 2026-04-23): timestamp of the last
+  /// "Ball in position" audio fire. Drives the 5 s repeat cadence from
+  /// the `onResult` loop via elapsed-time check. Nulled when the locked
+  /// ball leaves the anchor rectangle (or becomes untracked) so the next
+  /// re-entry fires immediately on the edge. Null-reset in
+  /// [_startCalibration] (Recal-1) and [dispose]. See ADR-080.
+  DateTime? _lastBallInPositionAudio;
+
   /// Index of the corner currently being dragged, or null if not dragging.
   int? _draggingCornerIndex;
 
@@ -233,6 +254,15 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   /// correction to the full bounding box (not just center).
   List<Detection> _toDetections(List<YOLOResult> results) {
     final detections = <Detection>[];
+    // Phase 3 (Anchor Rectangle): per-frame spatial-filter counters used for
+    // the DIAG-ANCHOR-FILTER summary log. Only meaningful when the filter is
+    // active and the anchor rectangle is set.
+    int anchorDropped = 0;
+    int anchorPassed = 0;
+    final anchorDroppedDetails = <String>[];
+    final anchorPassedDetails = <String>[];
+    final anchorActive = _anchorFilterActive && _anchorRectNorm != null;
+
     for (final r in results) {
       if (!_ballClassNames.contains(r.className)) continue;
 
@@ -255,11 +285,44 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
         );
       }
 
+      // Phase 3: spatial filter — drop detections whose bbox center is
+      // outside the anchor rectangle during waiting state. The rectangle is
+      // defined in the same (rotation-corrected) coordinate frame as [bbox].
+      if (anchorActive && !_anchorRectNorm!.contains(bbox.center)) {
+        anchorDropped++;
+        anchorDroppedDetails.add(
+          '${r.className}@(${bbox.center.dx.toStringAsFixed(3)},'
+          '${bbox.center.dy.toStringAsFixed(3)}) '
+          'size=(${bbox.width.toStringAsFixed(3)}x${bbox.height.toStringAsFixed(3)}) '
+          'conf=${r.confidence.toStringAsFixed(2)}');
+        continue;
+      }
+      if (anchorActive) {
+        anchorPassed++;
+        anchorPassedDetails.add(
+          '${r.className}@(${bbox.center.dx.toStringAsFixed(3)},'
+          '${bbox.center.dy.toStringAsFixed(3)}) '
+          'size=(${bbox.width.toStringAsFixed(3)}x${bbox.height.toStringAsFixed(3)}) '
+          'conf=${r.confidence.toStringAsFixed(2)}');
+      }
+
       detections.add(Detection(
         bbox: bbox,
         confidence: r.confidence,
         className: r.className,
       ));
+    }
+
+    // Phase 3: per-frame summary log — only when the filter actually dropped
+    // something this frame. Silent on no-drop frames to keep logs readable.
+    if (anchorActive) {
+      print('DIAG-ANCHOR-FILTER: dropped=$anchorDropped passed=$anchorPassed '
+          'rect=${_anchorRectNorm!.left.toStringAsFixed(3)},'
+          '${_anchorRectNorm!.top.toStringAsFixed(3)},'
+          '${_anchorRectNorm!.right.toStringAsFixed(3)},'
+          '${_anchorRectNorm!.bottom.toStringAsFixed(3)} '
+          '| passed (inside rect): [${anchorPassedDetails.join(", ")}] '
+          '| dropped (outside rect): [${anchorDroppedDetails.join(", ")}]');
     }
     return detections;
   }
@@ -351,6 +414,16 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       // Phase 2 (Anchor Rectangle): clear the anchor rectangle so a fresh
       // calibration starts with no overlay, consistent with Recal-1 full reset.
       _anchorRectNorm = null;
+
+      // Phase 3 (Anchor Rectangle): disarm the spatial filter and cancel
+      // any in-flight safety timer so a fresh calibration starts clean.
+      _anchorFilterActive = false;
+      _safetyTimeoutTimer?.cancel();
+      _safetyTimeoutTimer = null;
+
+      // Phase 5 (Anchor Rectangle): clear the ball-in-position audio
+      // timestamp so the next lock fires the announcement immediately.
+      _lastBallInPositionAudio = null;
     });
   }
 
@@ -636,6 +709,25 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _audioNudgeTimer = null;
   }
 
+  /// Phase 3: safety timeout callback. Fires when a kick entered
+  /// `confirming`/`active` but no decision was made within 2 seconds
+  /// (e.g., ISSUE-030 "session lock stuck"). Re-arms the spatial filter
+  /// and releases the session lock so the pipeline recovers to a clean
+  /// waiting state on its own — no operator intervention required.
+  void _onSafetyTimeout() {
+    if (!mounted) return;
+    print('DIAG-ANCHOR-FILTER: SAFETY TIMEOUT fired — no decision within 2s. '
+        'Re-arming filter and releasing session lock.');
+    _safetyTimeoutTimer = null;
+    if (_anchorRectNorm != null) {
+      _anchorFilterActive = true;
+    }
+    if (_ballId.isSessionLocked) {
+      _ballId.deactivateSessionLock();
+      _byteTracker.setProtectedTrackId(null);
+    }
+  }
+
   /// Called when user taps "Confirm" during reference capture sub-phase.
   /// Captures the player-selected ball's bbox area as the reference and
   /// locks the ByteTrack ball identity onto that specific track.
@@ -688,6 +780,16 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       _calibrationMode = false;
       _pipelineLive = true;
       _anchorRectNorm = anchorRect;
+      // Phase 3: arm the spatial filter. Locked ball sits inside the rectangle
+      // by construction, so its detections pass naturally from this moment on.
+      _anchorFilterActive = anchorRect != null;
+      if (anchorRect != null) {
+        print('DIAG-ANCHOR-FILTER: ON (locked — anchor rectangle armed, '
+            'rect=${anchorRect.left.toStringAsFixed(3)},'
+            '${anchorRect.top.toStringAsFixed(3)},'
+            '${anchorRect.right.toStringAsFixed(3)},'
+            '${anchorRect.bottom.toStringAsFixed(3)})');
+      }
 
       // Lock ByteTrack onto the player-selected track.
       _ballId.setReferenceTrack(selected);
@@ -767,6 +869,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                 //    - Manage State 1↔State 2 audio nudge timer transitions.
                 if (_awaitingReferenceCapture) {
                   final hadCandidates = _ballCandidates.isNotEmpty;
+                  final hadSelection = _selectedTrackId != null;
 
                   final ballTracks = tracks
                       .where((t) =>
@@ -799,16 +902,21 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                     _referenceCandidateBboxArea = null;
                   }
 
-                  // State 1 → State 2 transition: candidates appeared this
-                  // frame. Restart the audio nudge timer from zero (decision
-                  // table row 7: 30 s grace before first nudge).
+                  // Audio nudge timer transitions (all mutually exclusive):
+                  //   1→2: candidates appeared → start 30 s grace.
+                  //   2→1: candidates disappeared → cancel.
+                  //   3→2: aliveness check just cleared the tap selection
+                  //        while candidates remain → restart grace so the
+                  //        player gets reminded again if they don't re-tap.
                   final hasCandidates = _ballCandidates.isNotEmpty;
                   if (!hadCandidates && hasCandidates) {
                     _startAudioNudgeTimer();
                   } else if (hadCandidates && !hasCandidates) {
-                    // State 2 → State 1 transition: candidates disappeared.
-                    // Cancel any in-flight nudge; will restart on next 1→2.
                     _cancelAudioNudgeTimer();
+                  } else if (hadSelection &&
+                      _selectedTrackId == null &&
+                      hasCandidates) {
+                    _startAudioNudgeTimer();
                   }
                 }
 
@@ -828,6 +936,38 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                   final rawPosition = ball?.center;
                   final bboxArea = ball?.bboxArea;
                   final velocity = _ballId.velocity;
+
+                  // Phase 5 (Anchor Rectangle, ADR-080): "Ball in position"
+                  // announcement. Fires immediately on the edge where the
+                  // locked ball is tracked inside the anchor rectangle AND
+                  // verified stationary (isStatic), then repeats every 10 s
+                  // while that state persists. When the ball leaves the
+                  // rectangle, becomes untracked, or starts moving, the
+                  // timestamp nulls so the next re-stabilisation fires
+                  // immediately. Filter ON/OFF flickers during confirming↔
+                  // idle bounces leave the condition true as long as the
+                  // ball stays in rect and static.
+                  //
+                  // The `ball.isStatic` gate (ADR-082, 2026-04-24) prevents
+                  // false fires when a ball rolls through the rect without
+                  // stopping — isStatic is ByteTrack's sliding-30-frame
+                  // staticness flag, so this waits ~1 s after the ball
+                  // settles before announcing.
+                  final inPosition = ballDetected &&
+                      _anchorRectNorm != null &&
+                      _anchorRectNorm!.contains(ball.center) &&
+                      ball.isStatic;
+                  if (inPosition) {
+                    final now = DateTime.now();
+                    if (_lastBallInPositionAudio == null ||
+                        now.difference(_lastBallInPositionAudio!) >=
+                            const Duration(seconds: 10)) {
+                      _audioService.playBallInPosition();
+                      _lastBallInPositionAudio = now;
+                    }
+                  } else {
+                    _lastBallInPositionAudio = null;
+                  }
 
                   // Compute directZone from ball position through homography.
                   final directZone = rawPosition != null && _zoneMapper != null
@@ -851,6 +991,32 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                     _ballId.activateSessionLock();
                     _byteTracker.setProtectedTrackId(
                         _ballId.currentBallTrackId);
+                  }
+
+                  // Phase 3: spatial filter OFF-trigger. The instant the kick
+                  // enters confirming (or active, if we missed the confirming
+                  // frame), drop the rectangle filter so the in-flight ball
+                  // can be tracked anywhere on screen. Start the 2s safety
+                  // timer so the pipeline self-recovers if no decision fires.
+                  if (_anchorFilterActive &&
+                      (_kickDetector.state == KickState.confirming ||
+                          _kickDetector.isKickActive)) {
+                    _anchorFilterActive = false;
+                    _safetyTimeoutTimer?.cancel();
+                    _safetyTimeoutTimer = Timer(
+                      const Duration(seconds: 2),
+                      _onSafetyTimeout,
+                    );
+                    print('DIAG-ANCHOR-FILTER: OFF (kick state=${_kickDetector.state.name}) — 2s safety timer armed');
+                  } else if (!_anchorFilterActive &&
+                             _safetyTimeoutTimer != null &&
+                             _kickDetector.state == KickState.idle) {
+                    _anchorFilterActive = true;
+                    _safetyTimeoutTimer?.cancel();
+                    _safetyTimeoutTimer = null;
+                    _ballId.deactivateSessionLock();
+                    _byteTracker.setProtectedTrackId(null);
+                    print('DIAG-ANCHOR-FILTER: ON (kick returned to idle — false-alarm recovery)');
                   }
 
                   // 6. Trajectory prediction signals.
@@ -917,6 +1083,13 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                       _wallPredictor?.reset();
                       _ballId.deactivateSessionLock();
                       _byteTracker.setProtectedTrackId(null);
+                      // Phase 3: re-arm spatial filter on decision fired.
+                      _safetyTimeoutTimer?.cancel();
+                      _safetyTimeoutTimer = null;
+                      if (_anchorRectNorm != null) {
+                        _anchorFilterActive = true;
+                        print('DIAG-ANCHOR-FILTER: ON (decision fired — accepted)');
+                      }
 
                       // Log the impact decision.
                       final event = _impactDetector.currentResult!;
@@ -946,10 +1119,19 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                       );
                     } else {
                       // REJECT: not a real kick → discard silently.
+                      final ts = DateTime.now().toIso8601String().substring(11, 23);
+                      print('AUDIO-DIAG: impact REJECTED by kick gate (kickState=${_kickDetector.state.name}) ($ts)');
                       _impactDetector.forceReset();
                       _wallPredictor?.reset();
                       _ballId.deactivateSessionLock();
                       _byteTracker.setProtectedTrackId(null);
+                      // Phase 3: re-arm spatial filter on decision rejected.
+                      _safetyTimeoutTimer?.cancel();
+                      _safetyTimeoutTimer = null;
+                      if (_anchorRectNorm != null) {
+                        _anchorFilterActive = true;
+                        print('DIAG-ANCHOR-FILTER: ON (decision fired — rejected)');
+                      }
                     }
                   }
 
@@ -1015,7 +1197,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
               child: CustomPaint(
                 size: Size.infinite,
                 painter: TrailOverlay(
-                  trail: _kickDetector.state == KickState.idle
+                  trail: (_kickDetector.state == KickState.idle &&
+                          !(_anchorFilterActive &&
+                              _anchorRectNorm != null &&
+                              _ballId.currentBallTrack != null &&
+                              _anchorRectNorm!
+                                  .contains(_ballId.currentBallTrack!.center)))
                       ? const []
                       : _ballId.trail,
                   trailWindow: const Duration(seconds: 1, milliseconds: 500),
@@ -1460,6 +1647,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     // so a stale Timer cannot survive hot-reload / screen pop and fire
     // playTapPrompt against a disposed AudioService.
     _cancelAudioNudgeTimer();
+    // Phase 3 (Anchor Rectangle): cancel the safety timer so it cannot fire
+    // against a disposed state after the screen is popped.
+    _safetyTimeoutTimer?.cancel();
+    _safetyTimeoutTimer = null;
+    // Phase 5 (Anchor Rectangle): clear the ball-in-position timestamp.
+    _lastBallInPositionAudio = null;
     _byteTracker.reset();
     _ballId.reset();
     _impactDetector.forceReset();

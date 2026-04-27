@@ -301,7 +301,8 @@ class ImpactDetector {
 
   void _makeDecision() {
     // DIAG: Log decision context.
-    print('┌─── IMPACT DECISION ───');
+    final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
+    print('┌─── IMPACT DECISION ─── ($ts)');
     print('│ trackingFrames: $_trackingFrameCount (min: $minTrackingFrames)');
     print('│ lastRawPosition: $_lastRawPosition');
     print('│ lastBboxArea: ${_lastBboxArea.toStringAsFixed(6)}');

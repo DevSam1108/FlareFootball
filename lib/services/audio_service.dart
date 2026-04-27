@@ -29,36 +29,43 @@ class AudioService {
   /// - [ImpactResult.miss]: plays "Miss" voice clip.
   /// - [ImpactResult.noResult]: no audio.
   Future<void> playImpactResult(ImpactEvent event) async {
+    final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
     switch (event.result) {
       case ImpactResult.hit:
         if (event.zone != null) {
+          print('AUDIO-DIAG: impact result=hit zone=${event.zone} ($ts)');
           _player ??= AudioPlayer();
           await _player!.stop();
           await _player!.play(AssetSource('audio/zone_${event.zone}.m4a'));
         }
       case ImpactResult.miss:
+        print('AUDIO-DIAG: impact result=miss ($ts)');
         _player ??= AudioPlayer();
         await _player!.stop();
         await _player!.play(AssetSource('audio/miss.m4a'));
       case ImpactResult.noResult:
+        print('AUDIO-DIAG: impact result=noResult — silent ($ts)');
         break;
     }
   }
 
-  /// Phase 1 (Anchor Rectangle, 2026-04-19) stub for the State 2 tap-prompt
-  /// nudge. The asset will be recorded in Phase 5; until then this prints a
-  /// diagnostic line so on-device verification can confirm the 30s grace +
-  /// 10s repeat cadence by reading the device log.
+  /// Phase 5 (Anchor Rectangle, 2026-04-23): plays the State 2 tap-prompt
+  /// nudge ("Tap the ball to continue"). Wired to the Samantha-TTS asset
+  /// `assets/audio/tap_to_continue.m4a`.
   ///
-  /// Each line includes a per-episode counter (`#1`, `#2`, ...) and an HH:MM:SS
-  /// timestamp so the cadence is self-documenting in the log without
-  /// needing a wrist watch. Counter resets via [resetTapPromptCounter] at
-  /// the start of each new State 2 episode.
+  /// The per-episode counter + timestamp print is retained from the Phase 1
+  /// stub because audio playback cannot be verified from screen recordings;
+  /// the log line remains the only signal that the 30s grace + 10s repeat
+  /// cadence is firing correctly. Counter resets via [resetTapPromptCounter]
+  /// at the start of each new State 2 episode so the device log shows
+  /// `AUDIO-STUB #1` at the beginning of every fresh waiting cycle.
   Future<void> playTapPrompt() async {
-    // TODO Phase 5: replace with AssetSource('audio/tap_to_continue.m4a').
     _tapPromptCallCount++;
     final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
     print('AUDIO-STUB #$_tapPromptCallCount: Tap the ball to continue ($ts)');
+    _player ??= AudioPlayer();
+    await _player!.stop();
+    await _player!.play(AssetSource('audio/tap_to_continue.m4a'));
   }
 
   /// Phase 1 (Anchor Rectangle, 2026-04-19): reset the per-episode tap-prompt
@@ -67,6 +74,24 @@ class AudioService {
   /// fresh waiting cycle" to anyone reading the log during verification.
   void resetTapPromptCounter() {
     _tapPromptCallCount = 0;
+  }
+
+  /// Phase 5 (Anchor Rectangle, 2026-04-23): plays the return-to-anchor
+  /// success announcement ("Ball in position"). Wired to the Samantha-TTS
+  /// asset `assets/audio/ball_in_position.m4a`.
+  ///
+  /// Fired by the screen from its `onResult` per-frame loop via a timestamp-
+  /// based 10 s cadence check (see ADR-080). Also gated by `ball.isStatic`
+  /// (ADR-082) so a ball rolling through the rect does not trigger. A
+  /// minimal `print` is retained here because audio playback cannot be
+  /// verified from screen recordings; the log line is the only signal that
+  /// the cadence is firing on-device.
+  Future<void> playBallInPosition() async {
+    final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
+    print('AUDIO-DIAG: ball_in_position fired ($ts)');
+    _player ??= AudioPlayer();
+    await _player!.stop();
+    await _player!.play(AssetSource('audio/ball_in_position.m4a'));
   }
 
   /// Release the underlying audio player resources.
