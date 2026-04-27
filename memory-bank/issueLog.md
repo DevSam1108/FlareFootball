@@ -4,6 +4,42 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 ---
 
+## ISSUE-033: "Ball in Position" Audio Fires on a Ball Rolling Through the Anchor Rect Without Stopping
+
+**Date:** 2026-04-24
+**Platform:** iOS (iPhone 12) — reported from field test; fixed in same session.
+**Symptom:** Player was gently pushing the ball back toward the kick position with their foot. The ball rolled *through* the anchor rectangle without stopping. The app announced "Ball in position" on the brief frames the ball's center was inside the rect, but by the time the audio finished playing (~1 s clip), the ball had already exited the rect on the other side. A non-looking player (using audio alone) would hear the announcement and kick, but the Phase 3 spatial filter would drop the detection because the ball is no longer in rect — kick unregistered, silent failure.
+
+**Root Cause:** The Phase 5 Commit 2 trigger condition was purely geometric: `ballDetected && _anchorRectNorm!.contains(ball.center)`. No check for whether the ball is actually stationary. The instant the center crossed the rect boundary, the condition became true and the audio fired, regardless of velocity.
+
+**Solution that worked:** Added `&& ball.isStatic` as a fourth clause to the existing `inPosition` conjunction in `onResult` (`lib/screens/live_object_detection/live_object_detection_screen.dart`). `isStatic` is ByteTrack's sliding-30-frame staticness flag — already computed, no new state or threshold tuning needed. Accepts ~1 s delay between ball settling and audio firing (the staticness window warming up), which is desirable: a ball that briefly sits still before continuing to roll also won't falsely trigger. 1 line of functional code. See ADR-082.
+
+**Verified:** iOS-verified on iPhone 12 (2026-04-24) — rolling-ball-through-rect scenario produced no audio (ball never marked `isStatic`); genuinely-settled ball produced audio after ~1 s warm-up. `flutter analyze` clean, 175/175 tests passing.
+
+---
+
+## ISSUE-032: Tap-Prompt Audio Stuck Silent After State 3→State 2 Transition (Tap + Flicker Scenario)
+
+**Date:** 2026-04-24
+**Platform:** iOS (iPhone 12) — reported from field test; fixed in same session.
+**Symptom:** After the user taps a ball (State 2→3, green bbox, Confirm enabled), if the selected ball's track briefly flickers out of `_ballCandidates` (e.g. brief occlusion, low-confidence frame), the UI drops back to State 2 with all-red bboxes. The 30 s / 10 s tap-prompt audio nudge *does not restart* in this State 2 — the user is left with no audio reminder to re-tap, even though they are in the "please tap a ball" state. Can persist indefinitely as long as candidates never actually go to zero.
+
+**Root Cause:** The audio nudge timer lifecycle in `onResult` (inside the `if (_awaitingReferenceCapture)` block) was keyed on candidate presence transitions only:
+- `!hadCandidates && hasCandidates` → start (State 1→2)
+- `hadCandidates && !hasCandidates` → cancel (State 2→1)
+
+`_handleBallTap` cancelled the timer on first tap (State 2→3). The aliveness check (Decision B-i) at the top of the same `onResult` block silently cleared `_selectedTrackId` when the tapped track disappeared, dropping UI back to State 2. But from the timer's point of view nothing changed — `hadCandidates == hasCandidates == true` — so neither existing branch fired, and the timer stayed cancelled forever.
+
+**Solution that worked:** Added the State 3→2 transition as a third mutually-exclusive `else if` branch to the existing transition chain in `lib/screens/live_object_detection/live_object_detection_screen.dart`:
+1. `final hadSelection = _selectedTrackId != null;` captured at the top of the block (before the aliveness check).
+2. `else if (hadSelection && _selectedTrackId == null && hasCandidates) _startAudioNudgeTimer();` appended to the existing transition chain.
+
+Mutually exclusive with the other branches (hasCandidates/!hasCandidates are opposite). 4 lines of functional code, zero changes to `_handleBallTap`, `_startAudioNudgeTimer`, `_cancelAudioNudgeTimer`, or `AudioService`. No new state field. See ADR-081.
+
+**Verified:** iOS field-verified on iPhone 12 (2026-04-24) — after triggering a flicker that cleared selection, the first `AUDIO-STUB #1` line fired at t+30 s and continued on 10 s cadence until re-tap.
+
+---
+
 ## ISSUE-031: Back Button Unreachable During Calibration Mode + Awaiting Reference Capture (Z-Order Bug)
 
 **Date:** 2026-04-19

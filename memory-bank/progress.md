@@ -15,8 +15,8 @@
 - ✅ GSD planning infrastructure: `.planning/` with `ROADMAP.md`, `REQUIREMENTS.md`, `MILESTONES.md`, `STATE.md`, `PROJECT.md`
 
 ### Code Quality
-- ✅ `flutter analyze` -- 0 errors, 0 warnings, 85 infos (2026-04-19 after full /update-memory verification run; infos are all pre-existing style lints in services/tests plus the intentional `print` stub in `audio_service.playTapPrompt`)
-- ✅ `flutter test` -- 175/175 passing (2026-04-19; was 176, net −1 from rewriting 4 obsolete `BallIdentifier.setReferenceTrack` auto-pick-largest tests into 3 new contract tests for the new `setReferenceTrack(TrackedObject)` API introduced in Anchor Rectangle Phase 1)
+- ✅ `flutter analyze` -- 0 errors, 0 warnings, 93 infos (2026-04-24 after Phase 5 four commits; all infos are pre-existing style lints in services/tests plus the intentional `print` diagnostic lines in `audio_service.playTapPrompt` / `playBallInPosition` and the `DIAG-*` prints in `live_object_detection_screen.dart`)
+- ✅ `flutter test` -- 175/175 passing (2026-04-24; unchanged since 2026-04-19 — no new tests added for Phase 5 screen inline logic per the "no bundling tests with feature work" rule)
 - ✅ `withOpacity()` replaced with `withValues(alpha:)` (deprecated API migration)
 - ✅ DIAG-02/03/04/05 temporary diagnostic print statements removed (2026-03-09)
 - ✅ Diagnostic `print()` statements in `ImpactDetector._makeDecision()` intentionally retained for real-world testing analysis
@@ -286,11 +286,75 @@
 - Drive-by cleanup: deleted now-unused `_referenceCandidateBbox` field (1 declaration + 2 dead `= null` writes).
 - 175/175 tests still passing; analyzer clean.
 
-### Phase 2-5 — Pending
-- Phase 2: Anchor Rectangle Computation & Display — not started
-- Phase 3: Rectangle Filter During Waiting State — not started
-- Phase 4: Return-to-Anchor After Decision — not started
-- Phase 5: Audio Announcements & Edge Cases — not started
+### Phase 2 — Anchor Rectangle Computation & Display ✅ (implemented 2026-04-20, iOS-verified)
+- Design finalized 2026-04-20 in a discussion-only session. All four open questions resolved. See ADR-076 and `memory-bank/anchor-rectangle-feature-plan.md` Phase 2 section.
+- **Decisions:** bbox-relative multipliers (3× w × 1.5× h) — no cm conversion, no ball-size assumption; center frozen at lock; screen-axis-aligned (long side horizontal); magenta, dashed, 2 px stroke, no fill; lifecycle = visible from lock until recalibration/screen-exit.
+- **Implementation:**
+  - New file `lib/utils/canvas_dash_utils.dart` — shared `drawDashedLine` helper (byte-for-byte lift from `calibration_overlay.dart`'s private method).
+  - `calibration_overlay.dart` — removed private `_drawDashedLine`, uses shared util. Crosshair behavior unchanged.
+  - `live_object_detection_screen.dart` — new `Rect? _anchorRectNorm` state; cleared in `_resetAllState`; computed in `_confirmReferenceCapture` from the selected candidate's bbox; new Stack block + `_AnchorRectanglePainter` class (magenta `0xFFFF00FF`, dashed, 2 px, no fill).
+- **On-device verification (iPhone 12):** screenshot confirmed rectangle renders around the locked soccer ball with correct size/orientation; calibration grid and crosshair unchanged.
+- **Footprint:** 2 source files modified + 1 new file. No new tests (visual-only change). 0 architectural changes.
+- **What is NOT yet done:** Detection filter using rectangle (Phase 3), return-to-anchor cycle (Phase 4), audio announcements (Phase 5), field-tuning of 3× / 1.5× multipliers, Android verification.
+
+### Phase 3 — Rectangle Filter During Waiting State ✅ (implemented 2026-04-22, iOS-verified)
+- Design finalized 2026-04-20 and implementation executed in 7 small reviewed steps 2026-04-22. See `memory-bank/anchor-rectangle-feature-plan.md` Phase 3 section for full spec + field test results.
+- **Behavior:** inside `_toDetections`, detections whose (rotation-corrected) bbox center lies outside `_anchorRectNorm` are dropped before reaching ByteTrack. First *spatial* filter in the pipeline; additive to existing class/AR/Mahalanobis/session-lock defenses.
+- **State machine:** ON at lock → OFF at KickDetector `confirming`/`active` (arms 2 s safety timer) → ON at decision fired (accept or reject path, cancels timer) OR 2 s safety-timeout fires (re-arms filter, releases session lock, clears protected track) OR **(new 2026-04-22 polish)** kick returns to idle without a decision (false-alarm flicker recovery).
+- **Implementation (1 source file):** 2 state fields + 1 private method `_onSafetyTimeout` + 1 `else if` branch (polish). All edits are additive — new blocks adjacent to existing session-lock / decision / reset / dispose code. **Zero refactors of working code.** Saved `feedback_no_refactor_bundling.md` to user memory to codify this rule.
+- **Console diagnostics:** `DIAG-ANCHOR-FILTER` emits on every state transition and per-frame whenever the filter is active (not only on drops, since polish). Each log line includes `passed (inside rect): [class@(x,y) size=(w×h) conf=...]` and `dropped (outside rect): [...]` in parallel. Passed=0 with dropped=0 is now explicit — tells the reader YOLO emitted zero ball-class detections for that frame. CSV diagnostics deferred as optional Step 7 follow-up.
+- **Orange trail dot restored on resting ball** (2026-04-22 polish) — `TrailOverlay`'s idle-suppression gate (ADR-069/070) relaxed to pass the trail during idle only when ball's center is inside `_anchorRectNorm` and filter is armed. Because trail positions overlap at one pixel on a stationary ball, the pre-2026-04-15 flickering orange dot visual is back, but ONLY for the real ball inside the rect — FP risk on player bodies neutralised by the rect constraint.
+- **On-device verification (iPhone 12, 2026-04-22):** six smoke tests run — all passed. Test 4 (safety timeout fire) deferred to opportunistic observation. **Target circle false positives (ISSUE-022) confirmed silently dropped every frame** at their fixed banner positions — the #1 field-test blocker is now mitigated at source. Consecutive-hit follow-up test (post-polish): filter passes/drops every frame correctly across two kick cycles; no false-confirming flicker observed; ball-return re-acquisition clean from trackId=1 → trackId=2. Zone decision itself is wrong in both kicks (directZone first-zone-entered bug, orthogonal to anchor work).
+- **Footprint:** 1 source file modified (main implementation) + same file touched 3× during polish (all additive). No new files, no new tests. Zero architectural changes.
+- **What is NOT yet done:** CSV diagnostic columns (optional), Android (Realme 9 Pro+) verification, drop-log throttling (QoL), reject-path log wording refinement (cosmetic), field-tuning of 3×/1.5× rect multipliers (rect is tight for small balls but Mahalanobis rescue recovers).
+
+### Phase 4 — Return-to-Anchor After Decision ❌ (evaluated 2026-04-22, **skipped as standalone phase**)
+- Reviewed the plan's Phase 4 spec against what Phase 3 already delivers in production.
+- Conclusion: Phase 4 is mostly redundant with what Phase 3 + existing pipeline already provide:
+  - Filter re-arms ON at decision fire → "waiting for ball return" state is already the default.
+  - Mahalanobis rescue re-acquires the ball implicitly when it re-enters the rect (confirmed twice in field tests).
+  - Anchor rectangle persists across kicks (does not move) — already working since Phase 2.
+  - Recal-1 reset path already covers "awaiting return + user recalibrates".
+- The only genuinely new Phase 4 deliverable was a "ball far from locked position, bring closer" user nudge. That's an audio feature (Phase 5), with a trivial ~5-line partially-in-rect predicate that can live alongside the prompt.
+- **Decision:** skip Phase 4 as a standalone phase. Fold its one real deliverable into Phase 5.
+
+### Phase 5 — Audio Announcements & Edge Cases — In progress (2026-04-23)
+**Scope reduced during discussion to two prompts.** The "Ball far, bring closer" nudge was deferred: without field evidence it's actually needed, adding it now risks false-positive audio (ball-class FPs in an expanded awareness rect) and premature complexity. Will be revisited post-field-test if gaps appear.
+
+**Commit 1 — landed and iOS-verified (iPhone 12, 2026-04-23):**
+- Generated two audio assets via `say -v Samantha -r 170` + `ffmpeg` → `assets/audio/tap_to_continue.m4a` (20 KB, ~1.4 s) and `assets/audio/ball_in_position.m4a` (30 KB, ~2.3 s). Consistent voice/rate with existing zone/miss callouts; no crowd-cheer layer (instructional prompts, not celebratory).
+- `lib/services/audio_service.dart` — `playTapPrompt()` now plays `tap_to_continue.m4a` alongside the pre-existing per-episode counter `print`. The counter and timestamp log line are **retained** (not removed) because audio cannot be verified from screen recordings — the log line stays as the only signal that the 30 s grace + 10 s repeat cadence is firing.
+- **Field-verified on iPhone 12:** first audio fired at t+30 s in State 2, repeated every 10 s until ball tap, counter reset correctly on State 1↔2 transitions.
+
+**Commit 2 — landed and iOS-verified (2026-04-23):**
+- `lib/services/audio_service.dart` — new `playBallInPosition()` method. Mirrors `playTapPrompt` pattern; includes a minimal `print('AUDIO-DIAG: ball_in_position fired ($ts)')` for log visibility (retained deliberately per the same "screen recordings can't capture audio" reasoning).
+- `lib/screens/live_object_detection/live_object_detection_screen.dart` — wiring:
+  - New state field: `DateTime? _lastBallInPositionAudio`.
+  - Inline trigger block inside the existing `onResult` `if (_pipelineLive)` branch, between the ball-variable declarations and the KickDetector call. ~20 lines including docstring. Checks `ballDetected && _anchorRectNorm!.contains(ball.center)` (later extended in Commit 4 with `&& ball.isStatic`). On true, fires `playBallInPosition()` if elapsed ≥ 10 s since last fire (user-tuned from initial 5 s on 2026-04-24); on false, nulls the timestamp so the next re-entry fires immediately on the edge.
+  - Null-reset in `_startCalibration` (Recal-1 full reset) — adjacent to the existing Phase 3 filter-disarm block.
+  - Null-reset in `dispose()` — adjacent to the existing Phase 3 safety-timer cancel.
+- **No `Timer`, no `_startXxx`/`_cancelXxx` pair** — the condition itself is the truth source. Filter ON/OFF flickers during `confirming`/`idle` bounces leave the condition true as long as the ball stays in rect, so the cadence continues naturally through them (this was the trap in the original Timer-based proposal; see ADR-080).
+- **Audio asset shortened by user (2026-04-24)** from "Ball in position, you can kick the ball" (~2.3 s) to just "Ball in position" (~1 s). Regenerated via the same `say -v Samantha -r 170` + ffmpeg pipeline.
+- Field-verified on iPhone 12 (2026-04-23): 4 `AUDIO-DIAG: ball_in_position fired` events across ~20 s of gameplay, all at expected edges (lock, cadence, return-to-anchor after each kick). Cadence measured at 5.021 s between first two fires (before the 10 s tuning), within one frame of spec.
+- `flutter analyze` — 0 errors / 0 warnings / only existing intentional `avoid_print` infos plus one new `print` in `playBallInPosition`.
+- `flutter test` — 175/175 passing (no regressions from Phase 5 changes).
+
+**Commit 3 — State 3→2 audio nudge restart (2026-04-24, iOS-verified on iPhone 12):**
+- Flow gap found after Commit 2 field testing: the tap-prompt nudge timer got stuck cancelled if the user tapped a ball (State 3) and the selected track then flickered out of `_ballCandidates`, because the existing 1↔2 timer-transition block doesn't cover the 3→2 case.
+- `lib/screens/live_object_detection/live_object_detection_screen.dart` — added `final hadSelection = _selectedTrackId != null;` at the top of the `_awaitingReferenceCapture` block, plus a new mutually-exclusive `else if (hadSelection && _selectedTrackId == null && hasCandidates)` branch that calls `_startAudioNudgeTimer()`. 4 lines of functional code + comment update.
+- Zero changes to `_handleBallTap`, `_startAudioNudgeTimer`, `_cancelAudioNudgeTimer`, or `AudioService`. No new state field. Strictly additive — the new branch sits at the end of the existing chain so no working line is reordered.
+- `flutter analyze` — clean (only pre-existing intentional `avoid_print` infos). `flutter test` — 175/175 passing.
+- Field-verified: after triggering a flicker that cleared selection, first `AUDIO-STUB #1` fired at t+30 s, continued on 10 s cadence until re-tap, stopped correctly on re-tap. See ADR-081.
+
+**Commit 4 — isStatic gate on "Ball in position" audio (2026-04-24, iOS-verified):**
+- Flow gap found in same iOS field test: audio fired on a ball rolling through the rect without stopping. Non-looking player would hear "Ball in position" and kick, but by then the ball had exited the rect → filter dropped the detection → kick unregistered.
+- `lib/screens/live_object_detection/live_object_detection_screen.dart` — added `&& ball.isStatic` as a fourth clause to the existing `inPosition` conjunction. Reuses ByteTrack's sliding-30-frame staticness flag — no new state, no threshold tuning. Comment block expanded to document the new gate.
+- 1 line of functional code added. `flutter analyze` clean; 175/175 tests passing.
+- Trade-off: ~1 s delay between ball settling and audio firing (staticness window warming up). Acceptable — a ball that briefly sits still before continuing to roll won't trigger, which is desirable. See ADR-082.
+
+**Phase 5 — what is NOT yet done:**
+- "Ball far" nudge (deferred pending field evidence).
+- Android (Realme 9 Pro+) verification of all four commits.
 
 ---
 

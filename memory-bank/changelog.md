@@ -2,6 +2,189 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## Anchor Rectangle Phase 5 — Audio Announcements (4 Commits, 2 Bug Fixes) (2026-04-23 → 2026-04-24)
+
+### Summary
+Phase 5 delivered the audio layer for the Anchor Rectangle feature: two prompts (State 2 tap-prompt already scaffolded in Phase 1; new "Ball in position" return-to-anchor announcement) wired to Samantha-TTS assets. Scope reduced from three prompts to two during design; the "Ball far, bring closer" nudge was deferred pending field evidence it's needed. Four atomic commits landed over two days; the last two close flow-gap bugs surfaced during iPhone 12 field testing. User also made two small tuning tweaks (5 s → 10 s cadence on "Ball in position"; phrase shortened from "Ball in position, you can kick the ball" to just "Ball in position") and the audio assets and docs were refreshed to match.
+
+### Modified Files
+- **`lib/services/audio_service.dart`**
+  - `playTapPrompt()`: replaced the Phase 1 `print`-stub with a real `AssetSource('audio/tap_to_continue.m4a')` playback after the retained per-episode counter + timestamp `print`. Docstring updated to reflect wiring (was "will be replaced in Phase 5").
+  - New method `playBallInPosition()`: plays `audio/ball_in_position.m4a`; includes a minimal `print('AUDIO-DIAG: ball_in_position fired ($ts)')` for log visibility (audio playback cannot be verified from screen recordings). Docstring updated on 2026-04-24 to reflect 10 s cadence and `isStatic` gate.
+- **`lib/screens/live_object_detection/live_object_detection_screen.dart`**
+  - New state field `DateTime? _lastBallInPositionAudio` adjacent to existing Phase 3 fields.
+  - New inline trigger block inside the existing `onResult` `if (_pipelineLive)` branch (~20 lines including docstring). Fires `playBallInPosition()` when the locked ball is tracked, inside `_anchorRectNorm`, and `isStatic` (ADR-082) — with a 10 s re-fire cadence via timestamp elapsed check. No Timer.
+  - Null-reset of `_lastBallInPositionAudio` added in `_startCalibration()` (Recal-1) and `dispose()` adjacent to existing Phase 3 resets.
+  - `_awaitingReferenceCapture` block: added `final hadSelection = _selectedTrackId != null;` capture at top, plus a third mutually-exclusive `else if (hadSelection && _selectedTrackId == null && hasCandidates)` branch at the end of the existing timer-transition chain. Restores the 30 s / 10 s nudge when a tap selection is silently cleared by the aliveness check (ADR-081 / ISSUE-032).
+
+### New Files
+- **`assets/audio/tap_to_continue.m4a`** — Samantha TTS, rate 170, ~1.4 s, 20 KB. No crowd-cheer layer (instructional prompt, not celebratory).
+- **`assets/audio/ball_in_position.m4a`** — Samantha TTS, rate 170. Initial version "Ball in position, you can kick the ball" (~2.3 s); replaced 2026-04-24 with shortened "Ball in position" (~1 s, 15 KB) per user request.
+
+### Documentation
+- Added **ADR-079** (Phase 5 scope reduction + asset wiring policy + retained diagnostic print).
+- Added **ADR-080** (timestamp-in-loop cadence pattern — no dedicated Timers).
+- Added **ADR-081** (State 3→2 audio nudge restart on aliveness-cleared selection).
+- Added **ADR-082** (`isStatic` gate on "Ball in position" audio).
+- Added user-memory entry `feedback_reuse_existing_first.md` codifying "prefer existing loops/state over new Timers/helpers".
+- Added **ISSUE-032** (silent State 3→2 — tap-prompt audio stuck cancelled after tap+flicker).
+- Added **ISSUE-033** ("Ball in position" fires on a ball rolling through the rect without stopping).
+
+### Field Verification (iPhone 12)
+- **2026-04-23 session:** Commits 1 and 2 on-device verified. Log analysis captured 4 `AUDIO-DIAG: ball_in_position fired` events across ~20 s of gameplay at expected edges (lock, cadence on steady ball, return-to-anchor after each kick). Cadence measured at 5.021 s between first two fires (before the 10 s tuning), within one frame of spec. Target-circle FPs at (0.492, 0.452) continued to be dropped silently by the Phase 3 spatial filter throughout.
+- **2026-04-24 session:** Commits 3 and 4 implemented after two bugs surfaced in the same field test. Both commits field-verified on-device the same day. Commit 3: flicker-triggered aliveness clear, audio nudge resumed on 30 s / 10 s cadence until re-tap. Commit 4: rolling-ball-through-rect scenario produced no audio (correct — ball never `isStatic`); genuinely-settled ball produced audio after ~1 s warm-up (correct).
+
+### Tests
+- No new tests. Existing suite **175/175 passing** (unchanged across all four commits). Phase 5 trigger logic lives inline in `onResult`; adding tests for it would require refactoring the screen for testability, which violates `feedback_no_refactor_bundling.md`.
+
+### Verification
+- `flutter analyze` — 0 errors, 0 warnings, 93 infos (all pre-existing or intentional `avoid_print` on diagnostic prints).
+- `flutter test` — 175/175 passing.
+
+### Android (Realme 9 Pro+)
+Verification pending for all four commits.
+
+---
+
+## Anchor Rectangle Phase 3 Polish — False-Alarm Recovery + Resting-Ball Trail Dot + Enriched Log (2026-04-22, follow-up)
+
+### Summary
+Three small additive refinements to the Phase 3 anchor filter after the main implementation landed earlier the same day. All edits confined to `lib/screens/live_object_detection/live_object_detection_screen.dart`. Zero refactors of working code, zero new files, zero new tests. Motivated by an evening session where the user ran consecutive-hit field tests, spotted that (a) a false-alarm kick flicker could lock the filter OFF for 2 s, (b) the "resting-ball orange dot" from pre-2026-04-15 builds was missing, and (c) the `DIAG-ANCHOR-FILTER` log couldn't explain `passed=0 while ball visible` frames without more detail.
+
+### Modified Files
+- **`lib/screens/live_object_detection/live_object_detection_screen.dart`** —
+  - **OFF-trigger block** (immediately after existing session-lock activation): added `else if` branch `!_anchorFilterActive && _safetyTimeoutTimer != null && _kickDetector.state == KickState.idle`. Body: `_anchorFilterActive = true; _safetyTimeoutTimer?.cancel(); _safetyTimeoutTimer = null; _ballId.deactivateSessionLock(); _byteTracker.setProtectedTrackId(null); print('DIAG-ANCHOR-FILTER: ON (kick returned to idle — false-alarm recovery)');`. Same release-semantics as the decision-accept path. Purpose: close the dead 2 s window between a false-alarm kick flicker and the safety timer.
+  - **`_toDetections` diagnostic log upgrade:**
+    - Added `final anchorPassedDetails = <String>[];` alongside the existing `anchorDroppedDetails`.
+    - Drop entry now includes `size=(${bbox.width.toStringAsFixed(3)}x${bbox.height.toStringAsFixed(3)})`. Same format added to a new passed-entry branch inside the existing `if (anchorActive) { anchorPassed++; ... }` block.
+    - Log gate changed from `if (anchorDropped > 0)` to `if (anchorActive)` so the log fires every frame the filter is ON — including zero-detection frames (`passed=0 dropped=0`). This is what disambiguates "YOLO missed the ball" from "filter dropped the ball".
+    - Label rename: `dropped: [...]` → `dropped (outside rect): [...]`, new `passed (inside rect): [...]` line prepended.
+  - **`TrailOverlay` trail gate** (Stack, where `trail:` is passed): changed from `_kickDetector.state == KickState.idle ? const [] : _ballId.trail` to `_kickDetector.state == KickState.idle && !(_anchorFilterActive && _anchorRectNorm != null && _ballId.currentBallTrack != null && _anchorRectNorm!.contains(_ballId.currentBallTrack!.center)) ? const [] : _ballId.trail`. Effect: during idle, trail stays suppressed unless the ball is visibly inside the rect with the filter armed — then the trail's overlapping dots on a stationary ball render as the flickering orange dot the user remembered.
+
+### New Files
+None.
+
+### Tests
+- No new tests. Existing suite **175/175 passing** (unchanged).
+
+### Verification
+- **`flutter analyze`** — 92 infos (+1 from prior 91; the delta is the new `DIAG-ANCHOR-FILTER: ON (kick returned to idle — …)` `print` call, consistent with the existing diagnostic-print pattern). Zero errors, zero warnings.
+- **`flutter test`** — 175/175 passing.
+- **iOS (iPhone 12, same session):** two field runs captured.
+  - **Run 1** — explicitly exercised the new `else if` idle-edge recovery. Log shows the full sequence: re-acquisition into rect (`trackId=1 → trackId=5`), brief confirming-flicker (`OFF — 2s safety timer armed`), then back to idle, which fired the new branch: **`DIAG-ANCHOR-FILTER: ON (kick returned to idle — false-alarm recovery)`**. Filter re-armed immediately without waiting for the 2 s safety timer. **`else if` is field-proven.**
+  - **Run 2 (consecutive-hit)** — two complete kick cycles. Real ball consistently passed when YOLO emitted it, target-circle FPs consistently dropped, ball-return re-acquisition via Mahalanobis rescue from trackId=1 → trackId=2 clean at rect boundary. No flicker in this run. Zone decisions themselves were wrong in both kicks (`HIT zone 1` where ball actually crossed 1 → 6 → 7), but that is the pre-existing "first zone entered + premature fire" bug in `ImpactDetector`, orthogonal to all anchor-rectangle work.
+- **Android (Realme 9 Pro+):** pending.
+
+### Design Decisions (discussed this session)
+- **One `else if` instead of a new top-level `if`.** User pushed back on the initial "new block" proposal; folding into the existing OFF-trigger's `if`/`else if` chain is tighter and makes the state machine's symmetry obvious.
+- **`_safetyTimeoutTimer != null` as the "we're in the dead window" marker.** Chose this over introducing a new `_pendingRecovery` bool — the timer's own presence is a naturally-right signal, requires no new state field.
+- **Release session lock + clear protected track on idle-edge recovery.** Mirrors the decision-accept path exactly. Leaving session lock on would leave BallIdentifier locked to a trackId that may no longer be present.
+- **Trail gate: idle-rect exception, not full re-enable.** During idle but OUTSIDE the rect, trail stays suppressed (preserves the ADR-069/070 FP-protection intent). Only the rect-confirmed "real ball" case opts back in.
+- **Log fires every frame filter-ON, not only on drops.** Several discussion turns on cost (~30 lines/sec sustained) vs diagnostic value; chose visibility over quietness because the whole point of the change was "I can't see what's happening on no-drop frames". A throttle is easy to add later if needed.
+- **Phase 4 skipped as standalone phase.** Reviewed spec line-by-line; all its mechanics already work implicitly via Phase 3 + BallIdentifier rescue. Only genuinely-new deliverable is an audio nudge, which belongs in Phase 5.
+- Full rationale in ADR-078.
+
+---
+
+## Anchor Rectangle Phase 3 — Rectangle Filter During Waiting State (2026-04-22)
+
+### Summary
+Implemented Phase 3 of the Anchor Rectangle feature — the first **spatial** filter in the detection pipeline. Raw YOLO detections whose (Android-rotation-corrected) bbox **center** lies outside `_anchorRectNorm` are dropped inside `_toDetections` **before reaching ByteTrack**. The gate is state-driven: ON at lock → OFF at `KickState.confirming`/`active` with a 2 s safety timer → ON at decision fired (accept or reject path) OR 2 s safety-timeout (re-arms filter, releases session lock, clears protected track). Additive to every existing FP defense (class filter, AR > 1.8, Mahalanobis rescue, isStatic, session lock); touches zero working behavior. Six iOS smoke tests passed; **target circle false positives (ISSUE-022, the #1 field-test blocker) confirmed silently dropped at their fixed banner positions on every frame.** CSV diagnostics deferred as optional follow-up.
+
+### Modified Files
+- **`lib/screens/live_object_detection/live_object_detection_screen.dart`** —
+  - New state fields near `_anchorRectNorm`: `bool _anchorFilterActive = false;` and `Timer? _safetyTimeoutTimer;`. No other state surface touched.
+  - `_confirmReferenceCapture()`: added three lines alongside the existing `_anchorRectNorm = anchorRect;` — sets `_anchorFilterActive = anchorRect != null;` and emits `DIAG-ANCHOR-FILTER: ON (locked — …)` with rect bounds.
+  - New adjacent block in the `onResult` pipeline immediately after the existing session-lock activation block (untouched): fires on `KickState.confirming || isKickActive`, guarded by the filter flag itself as an edge detector. Sets `_anchorFilterActive = false;`, cancels any prior timer, starts `Timer(Duration(seconds: 2), _onSafetyTimeout)`, emits `DIAG-ANCHOR-FILTER: OFF (kick state=…) — 2s safety timer armed`.
+  - New private method `_onSafetyTimeout()` placed next to `_cancelAudioNudgeTimer` (sibling-timer locality). Re-arms filter if rect still present, releases session lock, clears protected track, logs `SAFETY TIMEOUT`.
+  - Result gate (accept path): added `_safetyTimeoutTimer?.cancel(); _safetyTimeoutTimer = null; if (_anchorRectNorm != null) { _anchorFilterActive = true; print('ON (decision fired — accepted)'); }` immediately after the existing `_ballId.deactivateSessionLock(); _byteTracker.setProtectedTrackId(null);` pair. Reject path: same block with `'rejected'` log.
+  - `_startCalibration` reset block (Recal-1): added `_anchorFilterActive = false; _safetyTimeoutTimer?.cancel(); _safetyTimeoutTimer = null;` next to the existing `_anchorRectNorm = null` line.
+  - `dispose`: added timer cancellation mirroring the `_cancelAudioNudgeTimer` pattern.
+  - `_toDetections`: new counters `anchorDropped` / `anchorPassed` + `anchorDroppedDetails` list and a precomputed `anchorActive` flag. Added `if (anchorActive && !_anchorRectNorm!.contains(bbox.center)) { anchorDropped++; anchorDroppedDetails.add('${r.className}@(…) conf=…'); continue; }` between the Android rotation-correction and the `detections.add(...)` call. After the loop: a single summary `print` with rect bounds + per-detection detail, emitted only when drops > 0.
+  - Zero refactors of working code anywhere in the file. Class filter, AR > 1.8 reject, rotation correction, session lock block, Mahalanobis rescue, result gate conditions — all untouched.
+
+### User Memory
+- Added `feedback_no_refactor_bundling.md` to `/Users/shashank/.claude/projects/.../memory/` after the user flagged (mid-session) that mixing refactors with feature work violates their trust. The rule: during feature work, only touch new code or make additive changes to existing blocks; accept small duplication now, clean it up as a separate single-purpose change later. Applied retroactively in this session: a proposed `isKickInProgress` getter refactor was dropped in favour of an inlined condition.
+
+### Tests
+- No new unit tests added — all six smoke tests are on-device behavioural tests tied to live detection + timer behaviour, which existing unit scaffolding does not exercise cleanly.
+- Existing test suite: **175/175 passing** (unchanged from prior session).
+
+### Verification
+- **`flutter analyze`** — 91 issues, all `info`-level (+6 from prior 85; the delta is the newly-added `DIAG-ANCHOR-FILTER` `print` calls, same intentional-print pattern already used across the diagnostic pipeline). Zero errors, zero warnings.
+- **iOS (iPhone 12)** — six on-device smoke tests passed: (1) ON at lock with log, (2) filter drops outside-rect decoys with enriched per-detection log, (3b) kick-not-caught scenario handled cleanly + target-circle FPs confirmed dropped, (3) full `ON → OFF → ON` cycle through a real kick with safety timer armed-but-not-fired and reject path also exercised, (5) re-calibration resets all Phase 3 state, (6) screen dispose cancels the safety timer. Test 4 (safety timeout actually firing) deferred to opportunistic observation during normal play — cannot be reliably reproduced on demand.
+- **Android (Realme 9 Pro+)** — pending.
+
+### Design Decisions (in discussion this session)
+- **Filter placement: pre-ByteTrack vs post-ByteTrack.** Chose pre-ByteTrack (inside `_toDetections`) per the plan's original spec. Post-ByteTrack was rejected because it leaves outside-rect noise visible to ByteTrack, to the diagnostic logs, and to the protected-track logic — pre-ByteTrack cleans the pipeline at the source. The feared "locked-ball nudge pushes it out of rect → ByteTrack starves" risk does not materialise in practice because the 3×/1.5× rect margin is generous and the OFF trigger fires the instant the ball's kick-onset is detected.
+- **Hit test: center-in-rect.** Rejected "full bbox inside" (too strict — bbox jitter causes spurious drops) and "any overlap" (too loose — half-in-frame FPs pass). Center-in-rect is the clean middle ground.
+- **OFF-trigger timing: `confirming` OR `active`, not just `active`.** The existing session-lock block fires at `isKickActive`; filter OFF needs to fire one state earlier (at `confirming`) so that in-flight detections are not dropped once the ball leaves the rect. Chose a new adjacent block over extending the existing condition to avoid changing the session-lock's own activation timing (a known-working path).
+- **Re-arm timing: on internal decision fire, not on audio start or audio end.** Bounce-back FPs appear within 100–300 ms of impact; re-arming at internal decision fire cuts them before they can enter ByteTrack.
+- **Safety timeout: 2 s from `confirming`.** Discussed 3 s and 2 s; chose 2 s as generous enough that no real kick (< 1.5 s flight) trips it, short enough that a stuck-lock scenario recovers quickly. When it fires, it also releases session lock (rejecting option "just re-arm filter" as incomplete: BallIdentifier would remain locked out).
+- **Edge detector for OFF: use the filter flag itself, not a `_prevKickState` field.** User question ("won't this miss kicks?") prompted simplification. Because the filter flag is `true` exactly once between lock and kick, it acts as its own edge detector. Simpler and robust to `confirming → idle → confirming` re-entries.
+- **Additive-only edits to working code.** User-flagged mid-session (see memory entry). Dropped a proposed `KickDetector.isKickInProgress` getter refactor that would have touched two working call sites; inlined the condition in the new Phase 3 block instead.
+- **Enriched drop log.** User asked how to verify *which* detection was dropped vs passed from logs alone. Added per-detection class / center / confidence to the drop log (passed detections are traceable downstream via `DIAG-BYTETRACK`).
+- Full rationale and rejected options in ADR-077.
+
+### Scenario Behavior (field-verified)
+- **Normal kick → decision.** Filter OFF during flight; re-armed on decision fire (accept path). Post-decision bounce-back / noise dropped immediately.
+- **Kick not caught by KickDetector.** Filter stays ON throughout; ball's flight detections (outside rect) dropped; locked track dies cleanly; on ball's return into rect, BallIdentifier re-acquires via `nearest_non_static` and cycle resumes. Ball resting outside rect is invisible until returned — consistent with Phase 4's planned "return to anchor" semantics.
+- **Kick confirmed but no decision (ISSUE-030 pattern).** After 2 s the safety timer re-arms filter and releases session lock; pipeline returns to clean waiting state without operator intervention.
+
+### Field Observations (non-blocking, tracked as future polish)
+- **Rect is tight for small balls.** Observed ball center drifting 0–14 millinormalized-units outside the right edge of a ~0.091-wide rect for brief periods. Mahalanobis rescue consistently recovered the locked track when the ball drifted back into rect. Multipliers `3×/1.5×` may be bumped to `4×/2×` if this recurs.
+- **Drop log verbosity.** ~30 lines/sec during sustained drops (e.g., three target circles + real ball out-of-rect). QoL throttling deferred.
+- **Reject-path log wording.** `DIAG-ANCHOR-FILTER: ON (decision fired — rejected)` is emitted even when filter was already ON (kick never reached `confirming`). Cosmetic; not a bug.
+- **KickDetector sensitivity and depthRatio < 0.7.** Both observed during soft kicks in the field test session; out of scope for Phase 3 (tracked separately).
+
+---
+
+## Anchor Rectangle Phase 2 — Rectangle Computation & Display (2026-04-20)
+
+### Summary
+Implemented Phase 2 of the Anchor Rectangle feature — the magenta dashed anchor rectangle now draws at the locked ball's position after the Confirm tap, sized **3× bbox width × 1.5× bbox height** of the locked ball and **frozen** at lock-time bbox center. Screen-axis-aligned (long side horizontal), magenta `0xFFFF00FF`, 2 px stroke, dashed, no fill. Visual only — detection is still global (filtering is Phase 3). All four Phase 2 open questions resolved in a discussion-only session and recorded in ADR-076; original "60×30 cm via ball-bbox scaling" plan language replaced because it implicitly assumed a fixed ball diameter, which violates the "ball size is not fixed" architecture rule. iOS (iPhone 12) device verification confirmed via screenshot.
+
+### Modified Files
+- **`lib/utils/canvas_dash_utils.dart` (new file)** — Top-level `drawDashedLine(canvas, start, end, paint, {dashLength = 8, gapLength = 6})` helper. Lifted byte-for-byte from `calibration_overlay.dart`'s private `_drawDashedLine`. Direction-agnostic (works for any two endpoints). Single source of truth for dashed-line rendering in the app.
+- **`lib/screens/live_object_detection/widgets/calibration_overlay.dart`** — Removed private `_drawDashedLine` (lines 253–277). Added import of the new shared util. Two call sites in `_paintCenterCrosshair` updated to the new top-level name (rename-only; signature and defaults identical). Crosshair behavior unchanged.
+- **`lib/screens/live_object_detection/live_object_detection_screen.dart`** —
+  - New import: `package:tensorflow_demo/utils/canvas_dash_utils.dart`.
+  - New state: `Rect? _anchorRectNorm` — anchor rectangle in normalized [0,1] coords. Null before lock and after recalibration.
+  - `_resetAllState()`: adds `_anchorRectNorm = null` alongside existing Phase 1 Recal-1 clears.
+  - `_confirmReferenceCapture()`: before the `setState`, looks up the selected candidate in `_ballCandidates` by `trackId`, computes `Rect.fromCenter(center: bbox.center, width: bbox.width * 3.0, height: bbox.height * 1.5)`, and assigns into `_anchorRectNorm` inside the same `setState`.
+  - Stack: new `if (_anchorRectNorm != null) LayoutBuilder → IgnorePointer → CustomPaint(painter: _AnchorRectanglePainter(...))` block, positioned before the Confirm button. Visible post-lock regardless of other state. `IgnorePointer` ensures taps flow through to underlying handlers.
+  - New private class `_AnchorRectanglePainter extends CustomPainter` — magenta stroke, 2 px, `PaintingStyle.stroke`. Paints 4 dashed edges via `drawDashedLine` using `YoloCoordUtils.toCanvasPixel` for normalized → canvas conversion (same transform every other overlay uses). `shouldRepaint` compares `rectNorm` + `cameraAspectRatio`.
+
+### New Files
+- `lib/utils/canvas_dash_utils.dart` — shared dashed-line helper.
+
+### Tests
+- No unit tests added — change is visual-only and has no extractable business logic. Existing 175/175 test suite remains passing (no behavior changes outside the painter).
+
+### Verification
+- **`flutter analyze`** — no new warnings; only pre-existing `avoid_print` and `no_leading_underscores_for_local_identifiers` infos.
+- **iOS (iPhone 12)** — user-provided device screenshot confirms: magenta dashed rectangle renders around the locked soccer ball, sized wider than tall (3:1.5 ratio), long side horizontal, centered on the ball; calibration grid renders normally; center crosshair unchanged after the shared-util refactor.
+- **Android (Realme 9 Pro+)** — pending.
+
+### Design Decisions
+- **Rectangle size = bbox-relative multipliers, not cm.** Earlier plan draft said "60×30 cm via ball-bbox scaling," which implicitly assumed a fixed ball diameter. The project architecture never assumes a ball size (see `memory/project_no_fixed_ball_size.md`). Bbox-relative multipliers give correct perspective scaling automatically because the ball's bbox encodes its depth, without a cm reference.
+- **Frozen center.** Rectangle does not follow the ball after lock. "Anchor" is meaningful only as a fixed region; a rectangle that follows the ball cannot filter the ball leaving its area (Phase 3) or serve as a return target (Phase 4).
+- **Screen-axis-aligned.** Covers the same filtering region as a target-aligned rect; keeps Phase 3 point-in-rect test trivially axis-aligned.
+- **Magenta dashed.** Distinct from every color currently used on the screen (red = ball bbox, green = calibration/confirm, yellow = unlocked track, orange = trail, purple = calibration debug). Dashed stroke encodes the semantic difference between "detection" and "region."
+- **Shared `drawDashedLine` util.** Chose shared extraction (option 2) over copy-paste (option 1) to honour the "production-bound POC, DRY" principle. Refactor is byte-identical, de-risked by on-device verification of the calibration crosshair.
+- Full rationale and rejected options in ADR-076.
+
+### Why the plan's "60×30 cm" language changed
+The 60×30 cm intent was a placeholder. The real requirement is "a region around the ball big enough to tolerate jitter but tight enough to exclude target circles and the kicker." Multipliers express that goal directly. Final multipliers will be field-tuned once Phase 3 turns on filtering and we can see the behavior in context.
+
+### Out of Scope (deferred to later phases)
+- Detection filter during waiting state (Phase 3).
+- Return-to-anchor cycle after decision (Phase 4).
+- Real audio asset + edge cases (Phase 5).
+- Android device verification.
+
+---
+
 ## Anchor Rectangle Phase 1 — Tap-to-Lock + Back-Button Z-Order Fix + Audio Counter (2026-04-19)
 
 ### Summary
