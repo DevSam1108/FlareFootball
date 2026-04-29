@@ -1,6 +1,7 @@
 import 'dart:ui' show Offset;
 
 import 'package:tensorflow_demo/models/impact_event.dart';
+import 'package:tensorflow_demo/services/kick_detector.dart' show KickState;
 import 'package:tensorflow_demo/services/trajectory_extrapolator.dart';
 
 /// Phases of the impact detection state machine.
@@ -111,6 +112,16 @@ class ImpactDetector {
   /// Used to detect impact: velocity dropping to <40% of peak = wall hit.
   double _peakVelocitySq = 0.0;
 
+  /// Most recent KickDetector state from the caller, captured at the top of
+  /// every [processFrame] call. Used by [_makeDecision] (Piece A, 2026-04-29)
+  /// to suppress phantom decisions that fire while no kick is in progress —
+  /// e.g., when detection jitter on a stationary ball pushes ImpactDetector
+  /// into [DetectionPhase.tracking] and the lost-frame trigger eventually
+  /// fires with `kickState == idle`. Defaults to [KickState.confirming] so
+  /// callers that don't supply the state (older tests) behave as before
+  /// (gate is permissive).
+  KickState _currentKickState = KickState.confirming;
+
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
@@ -155,7 +166,12 @@ class ImpactDetector {
     double? bboxArea,
     int? directZone,
     int? wallPredictedZone,
+    KickState kickState = KickState.confirming,
   }) {
+    // Capture caller's KickDetector state for this frame. Read by
+    // _makeDecision to suppress phantom decisions during idle.
+    _currentKickState = kickState;
+
     // Check cooldown expiration.
     if (_phase == DetectionPhase.result) {
       if (_resultTimestamp != null &&
@@ -184,7 +200,19 @@ class ImpactDetector {
         wallPredictedZone: wallPredictedZone,
       );
     } else {
-      _onBallMissing(extrapolation: extrapolation);
+      // Bug fix (2026-04-28, Path A Change 1): pass directZone through to
+      // _onBallMissing so it can keep _lastDirectZone fresh while ByteTrack's
+      // track is in `lost` state but still Kalman-predicting positions
+      // (which the screen still maps to a directZone every frame). Without
+      // this, when fast motion flips the track to `lost` mid-flight, the
+      // ball's zone progression (e.g., 1 → 6 → 7) is silently dropped and
+      // the lost-frame trigger fires with a stale zone (typically 1).
+      _onBallMissing(
+        extrapolation: extrapolation,
+        directZone: directZone,
+        rawPosition: rawPosition,
+        bboxArea: bboxArea,
+      );
     }
   }
 
@@ -265,22 +293,61 @@ class ImpactDetector {
         _trackingFrameCount++;
         // Track peak velocity and detect impact via velocity drop.
         if (velMagSq > _peakVelocitySq) _peakVelocitySq = velMagSq;
-        // Velocity dropped to <40% of peak while a zone signal exists
-        // = ball hit the wall. Solves bounce-back (ball never lost) without
-        // premature triggering (mid-flight velocity stays near peak).
-        if ((_lastDirectZone != null || _lastWallPredictedZone != null || _lastDepthVerifiedZone != null) &&
-            _peakVelocitySq > minVelocityMagnitudeSq &&
-            velMagSq < _peakVelocitySq * 0.4 &&
-            _trackingFrameCount >= minTrackingFrames) {
-          _makeDecision();
-          return;
-        }
+        // DIAG (additive): per-frame trace of the _onBallDetected path.
+        // Fires before the trigger check so every detected tracking frame is
+        // visible. Lets us see in the log which path the frame took, what
+        // got updated, and whether velocity-drop trigger A would fire.
+        print('DIAG-IMPACT [DETECTED] '
+            'phase=${_phase.name} '
+            'trackFrames=$_trackingFrameCount '
+            'directZone=$directZone (just-set _lastDirectZone=$_lastDirectZone) '
+            'velMagSq=${velMagSq.toStringAsFixed(6)} '
+            'peakVelSq=${_peakVelocitySq.toStringAsFixed(6)} '
+            'velRatio=${_peakVelocitySq > 0 ? (velMagSq / _peakVelocitySq).toStringAsFixed(3) : "n/a"} '
+            '(< 0.4 fires trigger A)');
+        // Bug fix (2026-04-28, Path A Change 2): velocity-drop trigger
+        // DISABLED. The original intent ("velMagSq < 0.4 × peak = ball hit
+        // the wall") was a heuristic stand-in for impact, but in practice
+        // it fires during normal mid-flight motion in our behind-kicker
+        // camera setup:
+        //   1. Peak gets set in frames 2–3 when the ball accelerates from
+        //      rest — the highest screen velocity in the entire kick.
+        //   2. As the ball flies up/away, apparent screen velocity decreases
+        //      due to perspective foreshortening (the ball is receding).
+        //   3. Kalman smoothing further dampens transient velocity spikes.
+        //   4. By frame 5–6 the ratio naturally crosses below 0.4, well
+        //      before the ball has reached the wall.
+        // Field evidence (2026-04-27, kicks 2 & 4 of 4): trigger fired at
+        // trackFrames=5 with depthRatio≈0.45 — i.e., ball was ~halfway
+        // through flight, not at the wall. _lastDirectZone was still the
+        // entry zone (1), giving a HIT zone 1 announcement when the ball
+        // was actually on its way to zones 5/8/9.
+        // Decisions now fire only via: (a) edge-exit in _makeDecision,
+        // (b) lost-frame trigger in _onBallMissing (5 missed frames),
+        // (c) maxTrackingDuration safety net (3 s). Original code preserved
+        // below for reversibility — if validation kicks reveal we still
+        // need an impact-detection trigger, restore it with a stricter
+        // threshold (e.g., < 0.2 × peak AND trackFrames > 8 AND depth
+        // verified).
+        // ORIGINAL CODE (DISABLED):
+        // if ((_lastDirectZone != null || _lastWallPredictedZone != null || _lastDepthVerifiedZone != null) &&
+        //     _peakVelocitySq > minVelocityMagnitudeSq &&
+        //     velMagSq < _peakVelocitySq * 0.4 &&
+        //     _trackingFrameCount >= minTrackingFrames) {
+        //   _makeDecision();
+        //   return;
+        // }
       case DetectionPhase.result:
         break; // Unreachable (handled above).
     }
   }
 
-  void _onBallMissing({ExtrapolationResult? extrapolation}) {
+  void _onBallMissing({
+    ExtrapolationResult? extrapolation,
+    int? directZone,
+    Offset? rawPosition,
+    double? bboxArea,
+  }) {
     if (_phase != DetectionPhase.tracking) return;
 
     // ADR-047, Fix 3: During occlusion, retain the last valid extrapolation.
@@ -293,13 +360,67 @@ class ImpactDetector {
     // (If extrapolation is null, we intentionally keep _bestExtrapolation
     // unchanged — unlike _onBallDetected which sets it unconditionally.)
 
+    // Bug fix (2026-04-28, Path A Change 1): keep _lastDirectZone fresh
+    // even on `missing` frames. The screen computes directZone every frame
+    // from the (possibly Kalman-predicted) ball position; ByteTrack flipping
+    // its track to `lost` is an internal state-machine detail, not a signal
+    // that zone information has stopped being meaningful. Same null-safety
+    // rule as _onBallDetected — a null directZone (ball off-grid) does NOT
+    // overwrite the last good zone.
+    if (directZone != null) {
+      _lastDirectZone = directZone;
+    }
+
+    // Bug fix extension (2026-04-28, Option A): keep _lastRawPosition and
+    // _lastBboxArea fresh during [MISSING] frames too. Same reasoning as
+    // directZone — these are inputs to other decision signals (edge-exit
+    // filter, depth ratio, future hit-detection methods that may combine
+    // position/bbox/zone signals). Freezing them at the last [DETECTED]
+    // frame removes those signals from the design palette. Same null-
+    // safety rule: a transient null does NOT overwrite the last good value.
+    if (rawPosition != null) {
+      _lastRawPosition = rawPosition;
+    }
+    if (bboxArea != null) {
+      _lastBboxArea = bboxArea;
+    }
+
     _lostFrameCount++;
+    // DIAG (additive): per-frame trace of the _onBallMissing path. Fires
+    // before the lost-frame trigger check so we see every missing frame on
+    // the way to the threshold. After Option A, all state fields are kept
+    // fresh in this branch — the values printed here are current.
+    print('DIAG-IMPACT [MISSING ] '
+        'phase=${_phase.name} '
+        'trackFrames=$_trackingFrameCount (frozen) '
+        'lostFrames=$_lostFrameCount/$lostFrameThreshold '
+        'lastDirectZone=$_lastDirectZone '
+        'lastBboxArea=${_lastBboxArea.toStringAsFixed(6)}');
     if (_lostFrameCount >= lostFrameThreshold) {
       _makeDecision();
     }
   }
 
   void _makeDecision() {
+    // Phantom-decision suppression (Piece A, 2026-04-29). When a trigger
+    // fires while KickDetector reports idle, the trigger is firing on
+    // detection jitter or stale state — not on a real kick. Suppress the
+    // entire decision construction (no IMPACT DECISION block printed, no
+    // result emitted) and reset to ready so the trigger doesn't keep
+    // re-firing every frame. This mirrors the audio kick gate at the
+    // screen level (which today rejects the same condition downstream
+    // with `AUDIO-DIAG: impact REJECTED by kick gate`) but moves the gate
+    // to the source so log noise and any future stale-state pollution
+    // are cleaned up at the same point.
+    if (_currentKickState == KickState.idle) {
+      print('DIAG-IMPACT [PHANTOM SUPPRESSED] '
+          'trigger fired with kickState=idle; resetting to ready '
+          '(trackFrames=$_trackingFrameCount, lostFrames=$_lostFrameCount, '
+          'lastDirectZone=$_lastDirectZone)');
+      _reset();
+      return;
+    }
+
     // DIAG: Log decision context.
     final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
     print('┌─── IMPACT DECISION ─── ($ts)');

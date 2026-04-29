@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tensorflow_demo/models/impact_event.dart';
 import 'package:tensorflow_demo/services/impact_detector.dart';
+import 'package:tensorflow_demo/services/kick_detector.dart' show KickState;
 import 'package:tensorflow_demo/services/trajectory_extrapolator.dart';
 
 void main() {
@@ -76,6 +77,65 @@ void main() {
       expect(detector.phase, DetectionPhase.result);
       expect(detector.currentResult!.result, ImpactResult.miss);
       expect(detector.statusText, 'MISS');
+    });
+
+    test('phantom decision suppressed when kickState=idle (Piece A, 2026-04-29)',
+        () {
+      // Reproduces the idle-jitter phantom-decision scenario: ImpactDetector
+      // is pushed into tracking phase by stationary-ball detection wobble,
+      // then the lost-frame trigger fires several frames later — but no real
+      // kick ever happened. Without the gate, this would emit a HIT zone 5
+      // decision (lastDirectZone is set during the jitter) and rely on the
+      // audio kick gate downstream to silently reject it. With the gate,
+      // _makeDecision suppresses construction entirely and resets to ready.
+      for (int i = 0; i < 10; i++) {
+        detector.processFrame(
+          ballDetected: true,
+          velocity: const Offset(0.01, 0.01),
+          rawPosition: const Offset(0.5, 0.5),
+          directZone: 5,
+          kickState: KickState.idle,
+        );
+      }
+      expect(detector.phase, DetectionPhase.tracking);
+
+      // Ball lost — would normally trigger _makeDecision after 5 frames.
+      for (int i = 0; i < ImpactDetector.lostFrameThreshold; i++) {
+        detector.processFrame(
+          ballDetected: false,
+          kickState: KickState.idle,
+        );
+      }
+
+      // Gate fires inside _makeDecision → _reset() → back to ready, no
+      // result emitted. This is the core of Piece A.
+      expect(detector.phase, DetectionPhase.ready);
+      expect(detector.currentResult, isNull);
+    });
+
+    test('decision still fires when kickState=confirming (gate is permissive)',
+        () {
+      // Same shape as the test above but with kickState=confirming. The gate
+      // must NOT trip — real kicks fire decisions exactly as before.
+      for (int i = 0; i < 10; i++) {
+        detector.processFrame(
+          ballDetected: true,
+          velocity: const Offset(0.01, 0.01),
+          rawPosition: const Offset(0.5, 0.5),
+          directZone: 5,
+          kickState: KickState.confirming,
+        );
+      }
+      for (int i = 0; i < ImpactDetector.lostFrameThreshold; i++) {
+        detector.processFrame(
+          ballDetected: false,
+          kickState: KickState.confirming,
+        );
+      }
+
+      expect(detector.phase, DetectionPhase.result);
+      expect(detector.currentResult!.result, ImpactResult.hit);
+      expect(detector.currentResult!.zone, 5);
     });
 
     test('directZone hit produces zone result', () {

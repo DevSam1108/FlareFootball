@@ -163,6 +163,14 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   /// [_startCalibration] (Recal-1) and [dispose]. See ADR-080.
   DateTime? _lastBallInPositionAudio;
 
+  /// Last time the "multiple objects detected" audio fired. Used to enforce
+  /// a 10 s cadence between repeats when more than one detection survives
+  /// the anchor filter during waiting state. Lifecycle mirrors
+  /// [_lastBallInPositionAudio]: nulled on re-calibration ([_startCalibration],
+  /// Recal-1) and on [dispose]. 2026-04-29 — added alongside the multi-object
+  /// cleanup nudge that fires before the ball-in-position check.
+  DateTime? _lastMultipleObjectsAudio;
+
   /// Index of the corner currently being dragged, or null if not dragging.
   int? _draggingCornerIndex;
 
@@ -424,6 +432,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       // Phase 5 (Anchor Rectangle): clear the ball-in-position audio
       // timestamp so the next lock fires the announcement immediately.
       _lastBallInPositionAudio = null;
+      // 2026-04-29: clear the multi-object audio timestamp on the same
+      // lifecycle event so the next lock starts with a clean cadence.
+      _lastMultipleObjectsAudio = null;
     });
   }
 
@@ -759,15 +770,17 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
     // Phase 2 (Anchor Rectangle, ADR-076): look up the locked ball's bbox
     // among the latest candidates and compute the anchor rectangle from it
-    // (3× bbox width × 1.5× bbox height, centered on bbox center). Done
-    // before setState so the new rect is applied atomically.
+    // (3.5× bbox width × 1.75× bbox height, centered on bbox center;
+    // bumped from 3.0×/1.5× on 2026-04-26 per field tuning — see ADR-077
+    // note about bumping when rect is tight for small balls). Done before
+    // setState so the new rect is applied atomically.
     Rect? anchorRect;
     for (final c in _ballCandidates) {
       if (c.trackId == _selectedTrackId) {
         anchorRect = Rect.fromCenter(
           center: c.bbox.center,
-          width: c.bbox.width * 3.0,
-          height: c.bbox.height * 1.5,
+          width: c.bbox.width * 3.5,
+          height: c.bbox.height * 1.75,
         );
         break;
       }
@@ -937,36 +950,75 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                   final bboxArea = ball?.bboxArea;
                   final velocity = _ballId.velocity;
 
-                  // Phase 5 (Anchor Rectangle, ADR-080): "Ball in position"
-                  // announcement. Fires immediately on the edge where the
-                  // locked ball is tracked inside the anchor rectangle AND
-                  // verified stationary (isStatic), then repeats every 10 s
-                  // while that state persists. When the ball leaves the
-                  // rectangle, becomes untracked, or starts moving, the
-                  // timestamp nulls so the next re-stabilisation fires
-                  // immediately. Filter ON/OFF flickers during confirming↔
-                  // idle bounces leave the condition true as long as the
-                  // ball stays in rect and static.
+                  // Phase 5 (Anchor Rectangle, ADR-080) waiting-state audio
+                  // prompts. Combined into a single priority-gated block
+                  // 2026-04-29:
                   //
-                  // The `ball.isStatic` gate (ADR-082, 2026-04-24) prevents
-                  // false fires when a ball rolls through the rect without
-                  // stopping — isStatic is ByteTrack's sliding-30-frame
-                  // staticness flag, so this waits ~1 s after the ball
-                  // settles before announcing.
-                  final inPosition = ballDetected &&
-                      _anchorRectNorm != null &&
-                      _anchorRectNorm!.contains(ball.center) &&
-                      ball.isStatic;
-                  if (inPosition) {
+                  //   Priority 1 — multi-object cleanup nudge (NEW).
+                  //   If more than one detection survived the anchor filter
+                  //   (i.e., 2+ objects inside the anchor rect), prompt the
+                  //   player to clear the spot. 10 s cadence. Fires for both
+                  //   genuinely separate objects (ball + cone) and dual-class
+                  //   misclassifications of a single object (e.g., a cone
+                  //   firing as both Soccer ball and tennis-ball at the same
+                  //   coordinates) — the player-facing action is identical
+                  //   in both cases: remove extras until only the soccer
+                  //   ball remains.
+                  //
+                  //   Priority 2 — "Ball in position" announcement (UNCHANGED).
+                  //   Only checked when at most one detection is in the rect
+                  //   (i.e., the multi-object branch did not fire). Fires
+                  //   immediately on the edge where the locked ball is
+                  //   tracked inside the anchor rectangle AND verified
+                  //   stationary (isStatic), then repeats every 10 s while
+                  //   that state persists. When the ball leaves the
+                  //   rectangle, becomes untracked, or starts moving, the
+                  //   timestamp nulls so the next re-stabilisation fires
+                  //   immediately. The `ball.isStatic` gate (ADR-082,
+                  //   2026-04-24) prevents false fires when a ball rolls
+                  //   through the rect without stopping — isStatic is
+                  //   ByteTrack's sliding-30-frame staticness flag, so this
+                  //   waits ~1 s after the ball settles before announcing.
+                  //
+                  // Note: the `else { _lastBallInPositionAudio = null; }`
+                  // branch in priority 2 is the ISSUE-036 cadence-reset bug
+                  // (single-frame YOLO miss resets the 10 s cooldown).
+                  // Deliberately preserved here — ISSUE-036 is tracked
+                  // separately and will be fixed in its own change.
+                  // 2026-04-29: Multi-object check DISABLED — suspected of
+                  // dropping valid kicks during field testing. The
+                  // priority-1 branch below now never executes; control
+                  // always falls through to the else branch, which contains
+                  // the byte-identical original ball-in-position logic.
+                  // To re-enable, restore the original condition on the
+                  // next line:
+                  //     _anchorFilterActive && _anchorRectNorm != null && detections.length > 1
+                  if (false) {
+                    // Priority 1: multiple objects in rect.
                     final now = DateTime.now();
-                    if (_lastBallInPositionAudio == null ||
-                        now.difference(_lastBallInPositionAudio!) >=
+                    if (_lastMultipleObjectsAudio == null ||
+                        now.difference(_lastMultipleObjectsAudio!) >=
                             const Duration(seconds: 10)) {
-                      _audioService.playBallInPosition();
-                      _lastBallInPositionAudio = now;
+                      _audioService.playMultipleObjects();
+                      _lastMultipleObjectsAudio = now;
                     }
                   } else {
-                    _lastBallInPositionAudio = null;
+                    // Priority 2: ball-in-position (existing logic, untouched).
+                    final inPosition = ballDetected &&
+                        _anchorRectNorm != null &&
+                        _anchorRectNorm!.contains(ball.center) &&
+                        ball.isStatic;
+                    if (inPosition) {
+                      final now = DateTime.now();
+                      if (_lastBallInPositionAudio == null ||
+                          now.difference(_lastBallInPositionAudio!) >=
+                              const Duration(seconds: 10)) {
+                        _audioService.playBallInPosition();
+                        _lastBallInPositionAudio = now;
+                      }
+                    } else {
+                      _lastBallInPositionAudio = null;
+                    }
                   }
 
                   // Compute directZone from ball position through homography.
@@ -1053,6 +1105,10 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                     bboxArea: bboxArea,
                     directZone: directZone,
                     wallPredictedZone: wallPredictedZone,
+                    // Piece A (2026-04-29): pass current KickDetector state so
+                    // ImpactDetector can gate phantom decisions at the source
+                    // instead of the audio kick gate catching them downstream.
+                    kickState: _kickDetector.state,
                   );
 
                   // DIAG: Per-frame tracking during active tracking.
@@ -1653,6 +1709,8 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _safetyTimeoutTimer = null;
     // Phase 5 (Anchor Rectangle): clear the ball-in-position timestamp.
     _lastBallInPositionAudio = null;
+    // 2026-04-29: clear the multi-object timestamp on dispose too.
+    _lastMultipleObjectsAudio = null;
     _byteTracker.reset();
     _ballId.reset();
     _impactDetector.forceReset();
