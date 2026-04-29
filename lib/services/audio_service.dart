@@ -94,6 +94,20 @@ class AudioService {
     await _player!.play(AssetSource('audio/ball_in_position.m4a'));
   }
 
+  /// Plays the "multiple objects detected at the kick spot" prompt.
+  /// Fired by the screen during waiting state when more than one detection
+  /// survives the anchor filter (i.e., 2+ objects inside the anchor rect).
+  /// Asks the player to clear the spot and keep only the soccer ball.
+  /// Cadence is enforced by the caller (10 s minimum between repeats).
+  /// 2026-04-29 — added alongside the multi-object cleanup nudge.
+  Future<void> playMultipleObjects() async {
+    final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
+    print('AUDIO-DIAG: multiple_objects fired ($ts)');
+    _player ??= AudioPlayer();
+    await _player!.stop();
+    await _player!.play(AssetSource('audio/multiple_objects.m4a'));
+  }
+
   /// Release the underlying audio player resources.
   void dispose() {
     _player?.dispose();
