@@ -4,6 +4,121 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 ---
 
+## ISSUE-036: "Ball in Position" Audio Fires Twice Within Seconds (10 s Cadence Broken by Single-Frame YOLO Misses)
+
+**Date:** 2026-04-29
+**Platform:** iOS (iPhone 12) — field test
+**Symptom:** Player heard "Ball in position" twice back-to-back, with the second announcement starting before the first finished or just after. The configured cadence was 10 s minimum between announcements (ADR-080 / ADR-082), so this should not have happened. User log captured timestamps at 15:15:50.766 and 15:15:54.869 — only 4.1 s apart.
+
+**Root Cause:** The trigger code in `lib/screens/live_object_detection/live_object_detection_screen.dart` (lines 958–972):
+```dart
+final inPosition = ballDetected && _anchorRectNorm!.contains(ball.center) && ball.isStatic;
+if (inPosition) {
+  if (_lastBallInPositionAudio == null || now.difference(_lastBallInPositionAudio!) >= 10s) {
+    _audioService.playBallInPosition();
+    _lastBallInPositionAudio = now;
+  }
+} else {
+  _lastBallInPositionAudio = null;   // ← BUG
+}
+```
+The `else` branch resets the cadence timestamp to `null` on **any** frame where `inPosition` is false. That includes harmless transients:
+- Single-frame YOLO miss (`passed=0` in the DIAG-ANCHOR-FILTER log)
+- Brief sub-pixel drift causing momentary `isStatic=false`
+- Ball briefly outside rect during physical drift
+
+In the field log: between the two firings the ball physically drifted (0.358, 0.729) → (0.363, 0.737) over ~60 frames, with 1–2 single-frame YOLO misses visible. Each YOLO miss reset the cadence to `null`. Next time `inPosition` was true, the null check triggered immediate firing.
+
+**Originally intended behaviour (per user, confirmed during fix discussion):** the `else` was placed there to fire "Ball in position" *immediately* after a real kick (ball replaced, fresh announcement). But it was applied too broadly — to every false-frame instead of just to "real kick happened" events.
+
+**Fix designed (NOT YET APPLIED):**
+1. Delete the `else` branch (3 lines).
+2. Add `_lastBallInPositionAudio = null;` inside the existing OFF-trigger block at line ~1006, where `_anchorFilterActive` flips false because `KickDetector.state == confirming || isKickActive`. This is the unique signature of a real kick attempt — brief YOLO misses don't trip the filter.
+
+After fix:
+- Real kick + ball replaced → fires immediately ✅
+- Brief YOLO miss while in position → cadence persists ✅
+- Sub-pixel drift → cadence persists ✅
+- False-alarm KickDetector flicker (rare) → fires once on next in-position frame, harmless
+
+**Status:** Root cause confirmed via code trace + field log. Fix designed (~2 lines net change). NOT YET APPLIED. Awaiting user "go ahead."
+
+**Related:** ADR-080 (timestamp-in-loop pattern), ADR-082 (`isStatic` gate), ISSUE-033 (related `isStatic` bug).
+
+---
+
+## ISSUE-035: Real Kick Suppressed by Piece A Phantom-Decision Gate (Race Condition with KickDetector + Phase 3 Idle-Edge Recovery)
+
+**Date:** 2026-04-29
+**Platform:** iOS (iPhone 12) — field test, immediately after Piece A applied
+**Symptom:** Player kicked the ball; ball physically traversed zones 1 → 6 (passed through grid). No audio announcement fired. Log shows `DIAG-IMPACT [PHANTOM SUPPRESSED]` with `lastDirectZone=6` — Piece A suppressed a real HIT zone 6 decision.
+
+**Field log timeline (single critical frame at the end of a real kick):**
+- F-N: lostFrames=4/5, ByteTrack `kick=confirming`, `lastDirectZone=1`, ball flying upward
+- F-N+1, all in same frame:
+  1. `KickDetector.processFrame()` (line 980) — internally transitions `confirming` → `idle`
+  2. Phase 3 idle-edge recovery (line 1015) sees `kickState=idle` → re-arms filter, deactivates session lock, prints `DIAG-ANCHOR-FILTER: ON (kick returned to idle — false-alarm recovery)`
+  3. `ImpactDetector.processFrame()` (line 1050) called with `kickState=idle`
+  4. `_onBallMissing` runs, `lostFrames` hits 5/5, `_lastDirectZone` updates to 6 (Path A keeps it fresh)
+  5. `_makeDecision` called → Piece A gate sees `kickState=idle` → `[PHANTOM SUPPRESSED]`
+  6. Real HIT zone 6 lost.
+
+**Root Cause:** Two issues stacked:
+
+1. **Piece A's gate is too narrow.** It checks `_currentKickState == KickState.idle` — the **instantaneous** state at decision-firing time. The "real kick happened" property is **historical** (a kick reached confirming/active at *some* point during the current tracking session), not instantaneous. Reading instantaneous state means every flicker that aligns with a decision-firing frame eats the decision.
+
+2. **KickDetector dropped to idle prematurely while `isImpactTracking=true`.** The existing test "ball loss during confirming stays confirming while impact is tracking" asserts this shouldn't happen, but in the field log it did. The exact trigger inside KickDetector is not yet identified — likely candidates: max-confirming-duration timeout, low-velocity-fallback, or a momentary `isImpactTracking=false` window. Worth investigating as its own bug.
+
+**Fix designed for Piece A (NOT applied):** Track inside `ImpactDetector` a single boolean `_kickConfirmedDuringTracking`. Set it whenever observed `kickState != KickState.idle`. Clear it in `_reset()`. Gate becomes:
+```
+Suppress decision IF kickState IS idle now AND was idle the entire tracking session.
+```
+
+This handles all four scenarios correctly:
+
+| Scenario | kickState history | Flag | Decision |
+|---|---|---|---|
+| Pure idle jitter (original phantom) | idle, idle, idle... | false | suppressed ✅ |
+| Normal real kick | idle → confirming → ... → confirming when fires | true | allowed ✅ |
+| **This bug** (KickDetector flips to idle one frame early) | idle → confirming → ... → idle | true | **allowed ✅** (the fix) |
+| Nudge case (briefly hits confirming) | idle → confirming briefly → idle | true; but no trigger fires (ball still in rect, no lost-frames) | reset by max-duration; no phantom |
+
+**Companion bug to investigate (separate):** KickDetector premature transition. Even with Piece A widened, KickDetector dropping to idle during a real kick is wrong behaviour. Read `lib/services/kick_detector.dart` to find the actual trigger.
+
+**Status:** Bug confirmed via direct field log. Piece A widening designed (1 boolean field + 2 line updates inside `impact_detector.dart`). NOT YET APPLIED. KickDetector internal transition not yet investigated. Awaiting user decision on path forward (widen Piece A vs. revert vs. investigate KickDetector first).
+
+**Related:** ADR-086 (Piece A gate, the version being widened), ADR-061 (prior failed attempt to gate ImpactDetector behind KickDetector), ISSUE-034 (Path A — separate ImpactDetector accuracy bug).
+
+---
+
+## ISSUE-034: ImpactDetector Premature Firing — Two Mechanisms Producing "HIT zone 1" When Ball Hit Elsewhere
+
+**Date:** 2026-04-22 first observed in field test; full root-cause diagnosis 2026-04-27 → 2026-04-28; Path A fix applied 2026-04-28. One state-flip scenario field-validated post-fix. Velocity-drop scenario validation still pending.
+**Platform:** iOS (iPhone 12), monitor-video reproduction. Android (Realme 9 Pro+) untested post-fix.
+**Symptom:** `IMPACT DECISION` block consistently announced `HIT zone 1` regardless of actual impact zone. Field test of 2026-04-22 (two consecutive lobbed kicks crossing 1→6→7) declared `HIT zone 1` both times. Re-tested 2026-04-27 (4 kicks across various trajectories) — every kick fired with `lastDirectZone=1` even when ball physically reached zones 7, 9, 2.
+
+**Root Cause:** TWO distinct firing mechanisms, both reproducible in logs once `DIAG-IMPACT [DETECTED]` and `[MISSING ]` per-frame traces were added to `impact_detector.dart`:
+
+1. **Mechanism A — velocity-drop trigger (`_onBallDetected` → `velMagSq < 0.4 × peak`, line 271–277).** Peak was set in frames 2–3 when ball was accelerating from rest (highest screen velocity in the entire kick). Apparent screen velocity then naturally decreased in mid-flight due to (a) perspective foreshortening as ball recedes from camera, (b) Kalman smoothing dampening transient spikes, (c) gravity at apex of lobbed kicks. By frames 5–6 the ratio crossed below 0.4 — trigger fired while `_lastDirectZone` was still 1 (the bottom-row entry zone, the only one the ball had reached).
+
+2. **Mechanism B — state-flip → lost-frame trigger.** When ByteTrack's match failed for the locked track in BOTH pass 1 (high-conf IoU) AND pass 2 (low-conf / Mahalanobis) — which happens during fast motion when Kalman prediction diverges from actual detection — `track.state` flipped to `lost`. Screen passed `ballDetected=false` (= `ball.state != TrackState.tracked`) to ImpactDetector, routing the frame through `_onBallMissing`. **`_onBallMissing` only incremented `_lostFrameCount`; it never updated `_lastDirectZone`, `_lastRawPosition`, or `_lastBboxArea`.** The screen still computed `directZone` from the (Kalman-predicted) ball position every frame, BYTETRACK log lines clearly showed the ball passing through zones 6, 7 — but ImpactDetector ignored those updates. After 5 missed frames, lost-frame trigger fired with `_lastDirectZone=1` (frozen since the last `_onBallDetected` call).
+
+**Critical false-trail eliminated during diagnosis:** initial hypothesis was that audio was lagging behind the decision (i.e., audio plays the wrong zone because it reads stale state by the time it dispatches). `AUDIO-DIAG` timestamps proved audio fires within 2 ms of the IMPACT DECISION block. Audio pipeline is correct — the bug is entirely in when and what the detector decides.
+
+**Solution that worked (Path A — minimal additive fix):**
+1. **Path A Change 1 + Option A extension:** `_onBallMissing` now accepts `directZone`, `rawPosition`, `bboxArea` and updates each `_last*` field with same null-safety rule as `_onBallDetected`. Closes mechanism B's silent zone-drop. User pushed back on initial proposal to update only `directZone`, correctly identifying that stale `rawPosition` and `bboxArea` would remove edge-exit detection and depth-ratio calculation from the design palette for future hit-detection iterations.
+2. **Path A Change 2:** velocity-drop trigger at lines 271–277 disabled (commented out with inline rationale + field evidence). Decisions now fire only via edge-exit, lost-frame trigger, or `maxTrackingDuration` (3 s).
+
+Original code preserved for reversibility. See ADR-083, ADR-084.
+
+**Path B (deferred):** restructure of `_onBallDetected`/`_onBallMissing` two-branch split (an artifact of the pre-ByteTrack era when "missing" meant "ball gone"), OR minimum cleanup of dead signals (`_lastWallPredictedZone`, `_bestExtrapolation`, `_lastDepthVerifiedZone`, `_velocityHistory`). Documented in `CLAUDE.md` "Pending Code-Health Work" section. Locked-in validation rule: any future `ImpactDetector` refactor must capture pre/post traces using the diagnostic harness shipped 2026-04-28. See ADR-085.
+
+**Verified (partial):** Mechanism B field-validated on iPhone 12 (2026-04-28, 12:16:16). Same physical scenario (1→6→7 trajectory, hit zone 7) that previously announced zone 1 now correctly announces zone 7 with `lastDirectZone=7`, `bestExtrapolation: zone 7`, `AUDIO-DIAG: impact result=hit zone=7`. Mechanism A validation pending — needs a flat-kick log where all frames stay [DETECTED] (no Mahalanobis rescue gaps). `flutter analyze` clean (99 infos, all `avoid_print` on intentional diagnostic lines), 175/175 tests passing.
+
+**Related:** ADR-061 (a previous attempt to gate `ImpactDetector` behind `KickDetector` state was reverted because it broke 3/5 grounded kicks). Any future "ImpactDetector should be asleep during waiting" work must coordinate with this prior failure — `_anchorFilterActive` may be a more robust gate than `KickDetector` state alone.
+
+---
+
 ## ISSUE-033: "Ball in Position" Audio Fires on a Ball Rolling Through the Anchor Rect Without Stopping
 
 **Date:** 2026-04-24
@@ -75,7 +190,7 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 ## ISSUE-030: Session Lock Stuck ON After Bounce-Back False Kick
 
-**Date:** 2026-04-15
+**Date:** 2026-04-15 (logged); 2026-04-22 (mitigated by Phase 3); formal verification log still owed.
 **Platform:** iOS (iPhone 12, monitor+video test)
 **Symptom:** After a legitimate HIT decision, ball bounces back from wall. KickDetector detects bounce-back motion as a new kick, activating session lock on the bounce-back trackID. Bounce-back ball quickly lost. Session lock remains ON permanently (200+ frames of "skipping re-acquisition"). Next real kick is completely silent — no tracking, no dots, no decision.
 
@@ -83,9 +198,15 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 **Evidence:** Log shows `DIAG-BALLID: locked trackId=31 LOST but session lock ACTIVE — skipping re-acquisition` repeated 200+ times across frames 2070-2310.
 
-**Fix:** Not yet implemented. Needs safety timeout — auto-deactivate session lock if locked track is lost for >N frames without a decision.
+**Mitigation (Phase 3, 2026-04-22):** Two recovery paths added in `live_object_detection_screen.dart` that did not exist when this issue was logged:
+1. **Idle-edge `else if`** (line ~1013): when a flickered/false kick returns to `KickState.idle` without firing a decision, `_anchorFilterActive` is re-armed AND `_ballId.deactivateSessionLock()` is called explicitly. This covers the most common bounce-back path — the bounce-back motion briefly trips KickDetector, then settles back to idle without a real decision.
+2. **2 s safety timer** (line ~1008): armed at the OFF-trigger; if no decision fires within 2 s of leaving idle, `_onSafetyTimeout` runs and clears the session lock. Covers any path where the kick state machine doesn't return cleanly to idle.
 
-**Status:** 🔴 OPEN
+**Path A interaction (2026-04-28):** the additional fix to `_onBallMissing` (now updates `_lastDirectZone`/`_lastRawPosition`/`_lastBboxArea` from passed-through values, see ADR-084) may also have closed the original residual case — a genuine in-flight kick whose track flips through `lost` and never produces a decision. With Path A, the lost-frame trigger now has fresh state to fire from. Re-test should confirm the original 200+-frame stuck scenario is no longer reproducible.
+
+**Status:** 🟢 MITIGATED BY PHASE 3 + Path A — one verification log of the original bounce-back scenario (legit HIT → bounce-back → next kick) still owed to formally close. Until that capture is in hand, treat as mitigated rather than fixed.
+
+**Related:** ADR-077 / ADR-078 (Phase 3 spatial filter + idle-edge recovery + safety timer), ADR-083 / ADR-084 (Path A ImpactDetector fix).
 
 ---
 
@@ -255,15 +376,22 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 ## ISSUE-021: Bounce-Back False Detection (Ball Detected on Rebound, Not Initial Impact)
 
-**Date:** 2026-04-01
+**Date:** 2026-04-01 (logged); 2026-04-22 (resolved by Phase 3); 2026-04-29 (formally closed by code-trace review).
 **Platform:** iOS (iPhone 12)
 **Symptom:** Ball hits zone 6 on the wall but YOLO misses the initial impact (ball too fast/small at the wall). After the ball bounces back toward the camera (getting larger, moving downward in frame), YOLO re-detects it and the pipeline reports zone 2 instead of zone 6.
 
 **Root Cause:** YOLO loses the ball near the wall (small bbox, motion blur). The ball bounces back and is re-detected closer to the camera. The WallPlanePredictor accumulates observations from the rebound (depth decreasing = ball coming back), which fails the `_isDepthIncreasing()` check. However, the ImpactDetector may still have stale `_lastWallPredictedZone` from before the loss, or the rebound trajectory enters the grid from the bottom.
 
-**Solution:** Pending. Options: (a) reject detections where depth trend reverses after a period of increasing depth, (b) use velocity-drop detection at point of wall contact, (c) time-box the prediction window so decisions can't be made from rebound data.
+**Resolution (Phase 3, 2026-04-22):** This entire failure mode is closed by the Phase 3 spatial filter, traced end-to-end on 2026-04-29:
 
-**Status:** Identified, not yet fixed.
+1. The instant a real IMPACT DECISION fires, both the accept branch (`live_object_detection_screen.dart:1091`) and the reject branch (`:1134`) re-arm `_anchorFilterActive = true`. The very next frame, the anchor filter is ON.
+2. With the filter ON, every YOLO detection whose bbox center is outside `_anchorRectNorm` is dropped at `_toDetections` (line ~264) **before ByteTrack ever sees it**.
+3. A bounce-back ball physically lands away from the kick spot — bbox center is outside the rect by definition. So the bounce-back detections are dropped, ByteTrack never sees them, BallIdentifier has no candidates to lock onto (lock was released on the same line that re-armed the filter), and ImpactDetector is never invoked. **There is no pipeline path from a bounce-back outside the rect to a second decision.**
+4. Bounce-back inside the rect (rare — ball would have to roll all the way back to the kick spot) is also handled: KickDetector is in `refractory` after `onKickComplete`, so it can't immediately re-confirm; if the ball settles inside the rect before refractory expires, `isStatic` keeps it from re-confirming; if it's still rolling when refractory expires, that's indistinguishable from the player legitimately starting their next kick — treating it as a kick is correct.
+
+**Status:** ✅ FIXED BY PHASE 3 (2026-04-22). No legacy "WallPlanePredictor stale data" workaround needed — the rebound never reaches WallPlanePredictor in the first place. WallPlanePredictor.reset() is also called on the same decision-fired lines as a defence-in-depth safeguard.
+
+**Related:** ADR-077 (Phase 3 spatial filter), ADR-078 (Phase 3 polish — idle-edge recovery + safety timer). See also CLAUDE.md "Bounce-back false detection" row in the issues table (🟢 MITIGATED BY PHASE 3, downgraded from "Identified 2026-04-01" on 2026-04-29).
 
 ---
 

@@ -2,6 +2,24 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## Session 2026-04-29 — Piece A applied + two follow-up bugs found
+
+**Code applied:**
+- **Piece A — kickState idle gate** (ADR-086): added `KickState` import, member `_currentKickState`, optional parameter on `processFrame`, and gate at top of `_makeDecision` in `lib/services/impact_detector.dart`. Screen call site `lib/screens/live_object_detection/live_object_detection_screen.dart:1061` updated to pass `kickState: _kickDetector.state`. 2 new tests in `test/impact_detector_test.dart`. 177/177 passing. `flutter analyze` clean (info-level avoid_print only).
+- **Memory bank — bounce-back FP formally closed:** `issueLog.md` ISSUE-021 flipped to ✅ FIXED BY PHASE 3 with full code-trace explanation. `progress.md` Known Issues entries struck through. `CLAUDE.md` issue-table rows for bounce-back FP, player-head FP, ball-identifier false re-acquisition, and ISSUE-030 session lock all downgraded from "open" / "identified" to "🟢 MITIGATED BY PHASE 3 (2026-04-22)" — these were stale entries that hadn't been updated when Phase 3 shipped.
+
+**Bugs discovered, fixes designed but NOT applied:**
+- **ISSUE-035 — Piece A eats real kicks** (🟠 OPEN). Field log 2026-04-29 captured a real zone-6 kick suppressed by Piece A. KickDetector transitioned `confirming → idle` one frame before ImpactDetector's lost-frame trigger fired; idle-edge recovery + Piece A's instantaneous-state gate ate the decision. Fix designed: track historical `_kickConfirmedDuringTracking` flag inside ImpactDetector, set when `kickState != idle`, clear in `_reset()`, gate becomes "suppress IF kickState IS idle now AND was idle the entire tracking session." 1 boolean field + 2 line updates inside `impact_detector.dart`.
+- **ISSUE-036 — "Ball in position" cadence double-fire** (🟠 OPEN). Field log 2026-04-29 captured two announcements within 4 seconds (configured cadence is 10 s). Root cause: `else` branch at lines 970–972 resets `_lastBallInPositionAudio = null` on every `inPosition=false` frame, including single-frame YOLO misses. Fix designed: delete the `else` AND add `_lastBallInPositionAudio = null` inside the filter OFF block at line ~1006. Resets cadence only on real kick attempts.
+
+**Investigations owed:**
+- KickDetector premature `confirming → idle` transition while `isImpactTracking=true`. The existing test "ball loss during confirming stays confirming while impact is tracking" asserts this shouldn't happen, but the field log shows it did. Read `lib/services/kick_detector.dart` to identify the actual trigger (likely a max-confirming-duration timeout, low-velocity-fallback, or `isImpactTracking` flickering). Separate from Piece A widening.
+- Path A mechanism A (velocity-drop trigger disabled) field validation — unchanged from prior session, still owed.
+
+**Scenarios discussed and analyses captured in `activeContext.md`** (Scenarios 1–5 with full evidence, root cause, fix proposal, and status). See "Session 2026-04-29 — scenarios discussed, analyses, and proposed fixes" section.
+
+---
+
 ## What Has Been Built and Works
 
 ### Core Infrastructure
@@ -15,8 +33,8 @@
 - ✅ GSD planning infrastructure: `.planning/` with `ROADMAP.md`, `REQUIREMENTS.md`, `MILESTONES.md`, `STATE.md`, `PROJECT.md`
 
 ### Code Quality
-- ✅ `flutter analyze` -- 0 errors, 0 warnings, 93 infos (2026-04-24 after Phase 5 four commits; all infos are pre-existing style lints in services/tests plus the intentional `print` diagnostic lines in `audio_service.playTapPrompt` / `playBallInPosition` and the `DIAG-*` prints in `live_object_detection_screen.dart`)
-- ✅ `flutter test` -- 175/175 passing (2026-04-24; unchanged since 2026-04-19 — no new tests added for Phase 5 screen inline logic per the "no bundling tests with feature work" rule)
+- ✅ `flutter analyze` -- 0 errors, 0 warnings, 99 infos (2026-04-28 after ImpactDetector Path A; +6 infos vs Phase 5 baseline due to today's new `AUDIO-DIAG` and `DIAG-IMPACT [DETECTED]/[MISSING]` diagnostic prints; all infos are `avoid_print` on intentional diagnostic lines or pre-existing style lints in services/tests)
+- ✅ `flutter test` -- 175/175 passing (2026-04-28; unchanged across Path A — fix is small and isolated; targeted unit tests for the new `_onBallMissing` parameters would require refactoring for testability, deferred to Path B)
 - ✅ `withOpacity()` replaced with `withValues(alpha:)` (deprecated API migration)
 - ✅ DIAG-02/03/04/05 temporary diagnostic print statements removed (2026-03-09)
 - ✅ Diagnostic `print()` statements in `ImpactDetector._makeDecision()` intentionally retained for real-world testing analysis
@@ -358,6 +376,30 @@
 
 ---
 
+### ImpactDetector Accuracy Fix — Path A — Applied + partially validated (2026-04-28)
+
+Two-day diagnosis-and-fix for the long-standing `directZone`-stuck-at-zone-1 bug. Two distinct firing mechanisms identified via per-frame log traces; minimal additive fix applied (Path A); broader cleanup (Path B) deferred and documented in `CLAUDE.md`. Mechanism B (state-flip → lost-frame trigger with stale zone) field-validated post-fix; mechanism A (velocity-drop trigger) validation pending.
+
+- ✅ **Diagnosis end-to-end with direct evidence** — distinguished mechanism A (velocity-drop fires too early in normal flight; `velRatio` crosses 0.4 at trackFrames=5–6) from mechanism B (state-flip → lost-frame trigger + `_onBallMissing` not updating zone signals = stale `_lastDirectZone=1`).
+- ✅ **Audio sync ruled out as bug source** — `AUDIO-DIAG` timestamps proved audio fires within 2 ms of `IMPACT DECISION` block on every kick.
+- ✅ **Diagnostic harness in place** — `AUDIO-DIAG` (audio_service.dart + screen reject branch), timestamped `IMPACT DECISION` block, `DIAG-IMPACT [DETECTED]` in `_onBallDetected`, `DIAG-IMPACT [MISSING ]` in `_onBallMissing`. Lets us verify any future `ImpactDetector` change empirically against pre/post log captures. Three of these are kept in production code per the established `DIAG-*` pattern.
+- ✅ **Path A Change 1 + Option A extension** — `_onBallMissing` now accepts and applies `directZone`, `rawPosition`, `bboxArea` (developer pushed back on initial narrow proposal that updated only directZone, correctly identifying that stale `rawPosition`/`bboxArea` would remove edge-exit and depth ratio from the design palette for future hit-detection iterations). Closes mechanism B's silent zone-drop. See ADR-084.
+- ✅ **Path A Change 2** — velocity-drop trigger (lines 271–277 of `impact_detector.dart`) commented out with detailed inline rationale + field evidence. Decisions now fire only via edge-exit, lost-frame trigger, or `maxTrackingDuration` (3 s safety net). Original code preserved for reversibility. See ADR-083.
+- ✅ **Cosmetic log cleanup** — removed the `(NOT updated...)` parentheticals from `[MISSING ]` print that became factually wrong after the fix.
+- ✅ **CLAUDE.md "Pending Code-Health Work" section** — documents Path B options (full restructure of `_onBallDetected`/`_onBallMissing` two-branch split, OR minimum cleanup of dead signals); names `_lastWallPredictedZone`, `_bestExtrapolation`, `_lastDepthVerifiedZone`, `_velocityHistory` as dead-on-arrival at decision time; coordinates with the existing "pending deletion" services (`wall_plane_predictor.dart`, `trajectory_extrapolator.dart`, etc.); locks in validation rule for any future refactor. See ADR-085.
+
+**iOS field validation (2026-04-28, 12:16:16):**
+- One state-flip kick captured. Ball physically traversed 1 → 6 → 7, hit zone 7. Trace: F2–F4 [DETECTED] (`_lastDirectZone=1`) → F5–F8 [MISSING ] sequence updating `_lastDirectZone` through 6 → 7 → 7 → 7 → F9 lost-frame trigger fires.
+- `IMPACT DECISION`: `lastDirectZone: 7`. `AUDIO-DIAG: impact result=hit zone=7`. **Pre-fix this exact scenario announced zone 1; post-fix it announced zone 7.** Mechanism B confirmed fixed.
+
+**Path A — what is NOT yet done:**
+- 🟡 Velocity-drop scenario validation (mechanism A) — still owed. Need a flat-kick log where all frames stay [DETECTED] (no Mahalanobis rescue gaps). User attempted but captured an idle-ball-jitter trace (kick=idle throughout) instead of a real kick. Idle-ball log incidentally showed Change 2 is at least passively working, but a real flat-kick log is owed.
+- 🟡 Multi-zone validation — only zone 7 verified post-fix. Need kicks landing in zones 2/3/4/5/6/8/9 to confirm the fix generalizes.
+- 🟡 Android (Realme 9 Pro+) verification of Path A — all phases pending.
+- 🟡 ImpactDetector entry-on-noise issue (latent gap from Phase 3's incomplete "asleep during waiting" implementation) — Path B candidate, currently producing wasted work but no wrong audio.
+
+---
+
 ## What Is Incomplete or Needs Decisions
 
 ### Pipeline Gating (`_pipelineLive`)
@@ -517,9 +559,9 @@
 - False positive dots still appearing during active kicks (open issue)
 
 **Known issues:**
-- Session lock has no safety timeout — can get stuck permanently if locked track is lost without a decision (e.g., bounce-back triggers false kick, ball disappears).
-- Bounce-back after legitimate kick triggers false kick detection.
-- False positive trail dots during active kicks (not idle — idle dots fixed by trail suppression).
+- ~~Session lock has no safety timeout — can get stuck permanently if locked track is lost without a decision (e.g., bounce-back triggers false kick, ball disappears).~~ → 🟢 MITIGATED BY PHASE 3 (2026-04-22): idle-edge `else if` recovery + 2 s safety timer at `live_object_detection_screen.dart:1008`. See ISSUE-030 in `issueLog.md`. One verification log of the original bounce-back scenario still owed to formally close.
+- ~~Bounce-back after legitimate kick triggers false kick detection.~~ → ✅ FIXED BY PHASE 3 (2026-04-22), formally closed 2026-04-29: anchor filter re-arms on the same frame the IMPACT DECISION block fires (lines `:1091` accept, `:1134` reject). Bounce-back ball outside the rect has its YOLO detections dropped at `_toDetections` before ByteTrack — no pipeline path to a second decision. See ISSUE-021 in `issueLog.md`.
+- False positive trail dots during active kicks (not idle — idle dots fixed by trail suppression). **Still open** — only place FPs can still surface, since anchor filter is OFF during flight.
 
 ### Mahalanobis Area Ratio Fix — Last-Measured-Area (2026-04-16, ISSUE-029)
 ✅ **Status:** FIXED & MONITOR-TESTED. 5/5 kicks across 3 test runs.
@@ -605,6 +647,9 @@
 | **Replace fragmented pipeline with ByteTrack (ADR-058)** | **Field testing (2026-04-04) revealed ISSUE-022 (target circle false positives) and deeper architectural flaw: no object identity, centroid-only tracking, fragmented band-aid services. Decision: complete ByteTrack in pure Dart with 8-state Kalman (cx,cy,w,h,vx,vy,vw,vh), two-pass IoU matching, BallIdentifier for automatic ball re-acquisition. Evaluated 6 options: band-aid filters, model retraining, centroid-only IoU tracker (fails for fast balls), ByteTrack (chosen), ML Kit plugin switch, plugin fork. ByteTrack replaces BallTracker, KalmanFilter, WallPlanePredictor, TrajectoryExtrapolator, _pickBestBallYolo, _applyPhaseFilter. ~800-1000 lines removed, ~450-500 added.** |
 | **Full bounding box as primary tracking data (ADR-059)** | **Existing pipeline extracted only bbox center (2 values), discarding width/height. This limited Kalman to 4-state (no size prediction), made IoU matching impossible, and required separate depth estimation. New approach: 8-state Kalman tracks full bbox + rates of change. Enables IoU matching for fast balls (predicted bbox accounts for motion + size change), built-in depth tracking, and richer object discrimination.** |
 | **Pre-ByteTrack AR > 1.8 upper bound only (ADR-068)** | **Rejects elongated YOLO false positives (torso AR 2.4-3.6) before ByteTrack. Upper bound only — no lower bound (no tall-narrow false positives observed, lower bound risked rejecting real ball). Real ball AR max ~1.5; threshold 1.8 gives margin. 2 lines, no pipeline changes. Player head (AR 0.9) still passes — needs different approach.** |
+| **Disable velocity-drop trigger in ImpactDetector (ADR-083)** | **Field evidence (2026-04-22 + 2026-04-27 kicks) showed `velMagSq < 0.4 × peak` heuristic was firing in normal mid-flight, not at wall impact. Peak set in frames 2–3 when ball accelerates from rest; apparent velocity then naturally drops below 40% due to perspective foreshortening + Kalman smoothing. Disabled the trigger; decisions now fire only via edge-exit, lost-frame trigger, or maxTrackingDuration. Original code preserved for reversibility.** |
+| **Update zone state in `_onBallMissing` (ADR-084)** | **Pre-fix `_onBallMissing` only incremented `_lostFrameCount`, ignoring `directZone`/`rawPosition`/`bboxArea` even when ByteTrack's Kalman was producing meaningful predicted positions. When `track.state` flipped to `lost` mid-flight, the ball's zone progression (1→6→7) was silently dropped. Path A Change 1 + Option A extension: pass and apply all three to keep every variable in the IMPACT DECISION block fresh. Developer pushed back on initial narrow proposal (only directZone) — correctly identifying that stale rawPosition/bboxArea would remove edge-exit and depth ratio from the design palette.** |
+| **Defer Path B refactor of ImpactDetector two-branch split (ADR-085)** | **Apply minimal Path A first (small risk surface, easy to validate), schedule Path B as separate cleanup phase. Documented in CLAUDE.md "Pending Code-Health Work" section so it isn't forgotten. Locked-in validation rule: any future ImpactDetector refactor must capture pre/post traces using the diagnostic harness (`AUDIO-DIAG`, `DIAG-IMPACT [DETECTED]`/[MISSING ]`, timestamped IMPACT DECISION block). Per `feedback_no_refactor_bundling.md`.** |
 
 ### ⚙️ Mahalanobis Rescue Identity Hijacking (ISSUE-026) — PARTIALLY FIXED
 - **Status:** Partially fixed via last-measured-area ratio check (2026-04-16, ADR-072). Hijack cases (3.8x-9x ratios) now blocked by upper bound 2.0. False positive dots still appear during active kicks (likely from non-rescue paths).

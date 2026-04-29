@@ -2,6 +2,61 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## ImpactDetector Accuracy Fix — Path A (2026-04-27 → 2026-04-28)
+
+### Summary
+Two-day structured diagnosis-and-fix session for the long-standing "directZone stuck at zone 1 / decision fires too early" bug. The bug was the project's #1 blocker since 2026-04-22 (zone accuracy effectively unusable on lobbed kicks). Two days of log-driven analysis identified two distinct firing mechanisms producing the same wrong-zone symptom; minimal additive fix applied (Path A); deeper restructure (Path B) deliberately deferred and documented in `CLAUDE.md` for a future cleanup phase. One state-flip kick field-validated post-fix (ball trajectory 1→6→7, hit zone 7, app correctly announced zone 7 — pre-fix it was announcing zone 1). Velocity-drop scenario validation still owed.
+
+### What was diagnosed
+- **Mechanism A (velocity-drop trigger):** `velMagSq < 0.4 × peak` at line 271–277 of `impact_detector.dart` was firing in normal mid-flight, not at wall impact. Peak gets set in frames 2–3 (ball accelerating from rest); apparent screen velocity then naturally drops below 40% as the ball recedes from the camera (perspective foreshortening + Kalman smoothing). Trigger fires while `_lastDirectZone` is still 1 (the entry zone).
+- **Mechanism B (state-flip → lost-frame trigger):** When ByteTrack's track flips to `lost` mid-flight (fast motion, Mahalanobis below threshold), screen passes `ballDetected=false` to ImpactDetector. `_onBallMissing` was incrementing only `_lostFrameCount`, never updating `_lastDirectZone`. Screen still computed `directZone` from the (Kalman-predicted) position every frame, but those updates never reached ImpactDetector. After 5 missed frames the lost-frame trigger fired with stale zone (1).
+- **Audio sync proven not at fault:** `AUDIO-DIAG` timestamps showed audio fires within 2 ms of the `IMPACT DECISION` block on every kick. Whatever the speaker says is exactly what the detector decided.
+- **Dead signals at decision time:** `_lastWallPredictedZone`, `_bestExtrapolation`, `_lastDepthVerifiedZone`, `_velocityHistory` are all computed every frame but never consulted by `_makeDecision()`. Depth-verified zone is structurally null (depth thresholds 0.7–1.3 don't match behind-kicker geometry; ball-at-wall depthRatio ≈ 0.3–0.45 in field data).
+
+### Modified Files
+
+**`lib/services/audio_service.dart`** — added `AUDIO-DIAG` print at the top of `playImpactResult()` for all three result branches (hit / miss / noResult). Each line includes HH:MM:SS.mmm timestamp from `DateTime.now()`. Allows pairing audio-fire moments against the IMPACT DECISION block to measure decision→audio lag.
+
+**`lib/services/impact_detector.dart`** — five additive changes:
+1. **Timestamp on `IMPACT DECISION` block** — appended `($ts)` to the existing `┌─── IMPACT DECISION ───` print line at the top of `_makeDecision()`. Enables direct pairing with `AUDIO-DIAG` timestamps.
+2. **`DIAG-IMPACT [DETECTED]` per-frame trace** — new print inside the `case DetectionPhase.tracking:` branch of `_onBallDetected`, before the trigger check. Logs phase, trackFrames, directZone (with just-set `_lastDirectZone`), velMagSq, peakVelSq, velRatio. Fires every frame the detected branch runs.
+3. **`DIAG-IMPACT [MISSING ]` per-frame trace** — new print inside `_onBallMissing` after the state updates. Logs phase, trackFrames (frozen), lostFrames/threshold, current `_lastDirectZone`, current `_lastBboxArea`. After Path A Change 1 + Option A extension, all printed values are kept fresh in this branch — the cosmetic "(NOT updated)" parentheticals from the initial draft were removed in the same session.
+4. **Path A Change 1 + Option A extension — zone state in `_onBallMissing`:** added `directZone`, `rawPosition`, `bboxArea` parameters to `_onBallMissing`; `processFrame` passes all three through; inside `_onBallMissing`, each updates its corresponding `_last*` field with the same null-safety rule used by `_onBallDetected` (transient null does NOT overwrite last good value). User pushed back on initial "Option B / leave it stale" recommendation, correctly identifying that stale state restricts the design palette for future hit-detection iterations — Option A was applied to keep all decision-context variables fresh.
+5. **Path A Change 2 — velocity-drop trigger disabled:** original block at lines 271–277 commented out with detailed inline rationale referencing field evidence (kicks 2 & 4 of 2026-04-27, both fired at trackFrames=5 with depthRatio≈0.45). Decisions now fire only via edge-exit (in `_makeDecision`), lost-frame trigger (in `_onBallMissing`, 5 missed frames), or `maxTrackingDuration` (3 s safety net). Original code preserved for reversibility.
+
+**`lib/screens/live_object_detection/live_object_detection_screen.dart`** — one additive change:
+- **`AUDIO-DIAG: impact REJECTED` print** on the reject branch of the result gate (the `else` of the `if (_kickDetector.isKickActive || ... confirming)` block). Logs when `_makeDecision()` produced a result but the kick gate suppressed it (e.g., decision fired during `kick=idle`). Closes the previously-opaque "decision fired but no audio" case in the log.
+
+**`CLAUDE.md`** — new "Pending Code-Health Work" section ahead of "What Is Out of Scope". Documents Path A as the surgical fix and Path B as the deferred cleanup option (restructure of `_onBallDetected`/`_onBallMissing` two-branch split, OR at minimum delete the dead signals listed above). Coordinates with the existing "pending deletion" services (`wall_plane_predictor.dart`, `trajectory_extrapolator.dart`, `kalman_filter.dart`, `ball_tracker.dart`). Locks in the validation rule that any future `ImpactDetector` refactor must capture pre/post traces using the diagnostic harness shipped this session.
+
+### Field Verification (iPhone 12)
+**One state-flip kick captured post-fix (2026-04-28, 12:16:16):**
+- Ball physically traversed zones 1 → 6 → 7, hit zone 7.
+- Trace: F2–F4 [DETECTED] (`_lastDirectZone` updated 1) → F5–F8 [MISSING ] (`_lastDirectZone` updated 6 → 6 → 7 → 7 — null doesn't overwrite at F8) → F9 [MISSING ] lost-frame trigger fires.
+- `IMPACT DECISION`: `lastDirectZone: 7`. `AUDIO-DIAG: impact result=hit zone=7 (12:16:16.725)`.
+- **Same scenario pre-fix announced zone 1 every time.** Mechanism B confirmed fixed.
+
+**Velocity-drop scenario validation: pending.** User attempted but captured an idle-ball-jitter trace (kick=idle throughout). The idle-ball log incidentally showed Change 2 is at least passively working (no decision fires under noise that pre-fix would have fired velocity-drop), but a real flat-kick log is still owed.
+
+### Tests
+- No new tests. Existing suite **175/175 passing**. The fix is small and isolated; targeted unit tests would require refactoring ImpactDetector for testability (which falls under Path B's deferred cleanup, not this fix).
+
+### Verification
+- `flutter analyze` — 0 errors, 0 warnings, 99 infos (up from 93 due to today's new diagnostic prints; all `avoid_print` on intentional `DIAG-*` and `AUDIO-DIAG` lines).
+- `flutter test` — 175/175 passing.
+
+### Documentation
+- Added **ADR-083** (disable velocity-drop trigger; Path A Change 2).
+- Added **ADR-084** (pass directZone/rawPosition/bboxArea to `_onBallMissing`; Path A Change 1 + Option A extension).
+- Added **ADR-085** (defer Path B refactor; apply minimal Path A first; lock in validation rule for any future ImpactDetector refactor).
+- Added **ISSUE-034** (ImpactDetector premature firing — two mechanisms diagnosed and fixed).
+- Updated `CLAUDE.md` with Pending Code-Health Work section.
+
+### Android (Realme 9 Pro+)
+Verification pending for Path A. Specifically watch that the new `DIAG-IMPACT` prints fire at the same state transitions on Android as on iOS, and that the rotation-correction in `_toDetections` doesn't interact differently with the unchanged anchor filter.
+
+---
+
 ## Anchor Rectangle Phase 5 — Audio Announcements (4 Commits, 2 Bug Fixes) (2026-04-23 → 2026-04-24)
 
 ### Summary
