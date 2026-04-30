@@ -3,6 +3,7 @@ import 'dart:ui' show Offset;
 import 'package:tensorflow_demo/models/impact_event.dart';
 import 'package:tensorflow_demo/services/kick_detector.dart' show KickState;
 import 'package:tensorflow_demo/services/trajectory_extrapolator.dart';
+import 'package:tensorflow_demo/utils/diag_log.dart';
 
 /// Phases of the impact detection state machine.
 enum DetectionPhase {
@@ -297,7 +298,7 @@ class ImpactDetector {
         // Fires before the trigger check so every detected tracking frame is
         // visible. Lets us see in the log which path the frame took, what
         // got updated, and whether velocity-drop trigger A would fire.
-        print('DIAG-IMPACT [DETECTED] '
+        diagLog('DIAG-IMPACT [DETECTED] '
             'phase=${_phase.name} '
             'trackFrames=$_trackingFrameCount '
             'directZone=$directZone (just-set _lastDirectZone=$_lastDirectZone) '
@@ -390,7 +391,7 @@ class ImpactDetector {
     // before the lost-frame trigger check so we see every missing frame on
     // the way to the threshold. After Option A, all state fields are kept
     // fresh in this branch — the values printed here are current.
-    print('DIAG-IMPACT [MISSING ] '
+    diagLog('DIAG-IMPACT [MISSING ] '
         'phase=${_phase.name} '
         'trackFrames=$_trackingFrameCount (frozen) '
         'lostFrames=$_lostFrameCount/$lostFrameThreshold '
@@ -409,11 +410,11 @@ class ImpactDetector {
     // result emitted) and reset to ready so the trigger doesn't keep
     // re-firing every frame. This mirrors the audio kick gate at the
     // screen level (which today rejects the same condition downstream
-    // with `AUDIO-DIAG: impact REJECTED by kick gate`) but moves the gate
+    // with `DIAG-AUDIO: impact REJECTED by kick gate`) but moves the gate
     // to the source so log noise and any future stale-state pollution
     // are cleaned up at the same point.
     if (_currentKickState == KickState.idle) {
-      print('DIAG-IMPACT [PHANTOM SUPPRESSED] '
+      diagLog('DIAG-IMPACT [PHANTOM SUPPRESSED] '
           'trigger fired with kickState=idle; resetting to ready '
           '(trackFrames=$_trackingFrameCount, lostFrames=$_lostFrameCount, '
           'lastDirectZone=$_lastDirectZone)');
@@ -423,7 +424,8 @@ class ImpactDetector {
 
     // DIAG: Log decision context.
     final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
-    print('┌─── IMPACT DECISION ─── ($ts)');
+    print('┌─── IMPACT DECISION ───');
+    print('│ timestamp=$ts');
     print('│ trackingFrames: $_trackingFrameCount (min: $minTrackingFrames)');
     print('│ lastRawPosition: $_lastRawPosition');
     print('│ lastBboxArea: ${_lastBboxArea.toStringAsFixed(6)}');

@@ -12,6 +12,7 @@ import 'package:tensorflow_demo/screens/live_object_detection/widgets/rotate_dev
 import 'package:tensorflow_demo/screens/live_object_detection/widgets/trail_overlay.dart';
 import 'package:tensorflow_demo/services/audio_service.dart';
 import 'package:tensorflow_demo/services/bytetrack_tracker.dart';
+import 'package:tensorflow_demo/services/diag_log_file.dart';
 import 'package:tensorflow_demo/services/ball_identifier.dart';
 import 'package:tensorflow_demo/services/homography_transform.dart';
 import 'package:tensorflow_demo/services/target_zone_mapper.dart';
@@ -19,6 +20,7 @@ import 'package:tensorflow_demo/services/kick_detector.dart';
 import 'package:tensorflow_demo/services/trajectory_extrapolator.dart';
 import 'package:tensorflow_demo/services/wall_plane_predictor.dart';
 import 'package:tensorflow_demo/utils/canvas_dash_utils.dart';
+import 'package:tensorflow_demo/utils/diag_log.dart';
 import 'package:tensorflow_demo/utils/yolo_coord_utils.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
@@ -210,6 +212,11 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   void initState() {
     super.initState();
 
+    // Begin per-session on-device log capture. Creates a new timestamped
+    // `.log` file in the app's Documents directory and starts buffering
+    // every `print()` line. Closed in `dispose()`.
+    DiagLogFile.instance.start();
+
     // YOLO path — YOLOView manages its own camera pipeline.
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.landscapeLeft,
@@ -324,7 +331,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     // Phase 3: per-frame summary log — only when the filter actually dropped
     // something this frame. Silent on no-drop frames to keep logs readable.
     if (anchorActive) {
-      print('DIAG-ANCHOR-FILTER: dropped=$anchorDropped passed=$anchorPassed '
+      diagLog('DIAG-ANCHOR-FILTER: dropped=$anchorDropped passed=$anchorPassed '
           'rect=${_anchorRectNorm!.left.toStringAsFixed(3)},'
           '${_anchorRectNorm!.top.toStringAsFixed(3)},'
           '${_anchorRectNorm!.right.toStringAsFixed(3)},'
@@ -584,7 +591,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
         : 'null';
 
     // --- Print comprehensive diagnostic block ---
+    final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
     print('┌─── CALIBRATION DIAGNOSTICS ───');
+    print('│ timestamp=$ts');
     print('│ corners TL=(${tl.dx.toStringAsFixed(4)}, ${tl.dy.toStringAsFixed(4)}) '
         'TR=(${tr.dx.toStringAsFixed(4)}, ${tr.dy.toStringAsFixed(4)}) '
         'BR=(${br.dx.toStringAsFixed(4)}, ${br.dy.toStringAsFixed(4)}) '
@@ -727,7 +736,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   /// waiting state on its own — no operator intervention required.
   void _onSafetyTimeout() {
     if (!mounted) return;
-    print('DIAG-ANCHOR-FILTER: SAFETY TIMEOUT fired — no decision within 2s. '
+    diagLog('DIAG-ANCHOR-FILTER: SAFETY TIMEOUT fired — no decision within 2s. '
         'Re-arming filter and releasing session lock.');
     _safetyTimeoutTimer = null;
     if (_anchorRectNorm != null) {
@@ -797,7 +806,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       // by construction, so its detections pass naturally from this moment on.
       _anchorFilterActive = anchorRect != null;
       if (anchorRect != null) {
-        print('DIAG-ANCHOR-FILTER: ON (locked — anchor rectangle armed, '
+        diagLog('DIAG-ANCHOR-FILTER: ON (locked — anchor rectangle armed, '
             'rect=${anchorRect.left.toStringAsFixed(3)},'
             '${anchorRect.top.toStringAsFixed(3)},'
             '${anchorRect.right.toStringAsFixed(3)},'
@@ -813,17 +822,23 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       _selectedTrackId = null;
       _cancelAudioNudgeTimer();
 
-      print('DIAG-BYTETRACK: locked ball trackId=${_ballId.currentBallTrackId} '
+      diagLog('DIAG-BYTETRACK: locked ball trackId=${_ballId.currentBallTrackId} '
           'refBboxArea=${_referenceBboxArea!.toStringAsFixed(6)}');
       // Log full calibration snapshot at pipeline start for diagnostic comparison.
       print('┌─── PIPELINE START ───');
       print('│ refBboxArea=${_referenceBboxArea!.toStringAsFixed(6)}');
       print('│ lockedTrackId=${_ballId.currentBallTrackId}');
       _logCalibrationDiagnostics();
-      print('│ timestamp=${DateTime.now().toIso8601String()}');
       print('└───────────────────────');
     });
-    DiagnosticLogger.instance.start();
+    // 2026-04-30: DiagnosticLogger CSV is unplugged in favor of the new
+    // per-session `.log` file written by DiagLogFile (started above in
+    // initState). Without this `start()` call, _active stays false so all
+    // logFrame/logDecision/stop/filePath calls become natural no-ops and
+    // the "Share Log CSV" button hides itself (its visibility is gated on
+    // filePath != null). Code is preserved as dead code for now; full
+    // removal will happen during a later refactor.
+    // DiagnosticLogger.instance.start();
   }
 
   @override
@@ -855,7 +870,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
               if (_lastFrameTime != null) {
                 final ms = now.difference(_lastFrameTime!).inMilliseconds;
                 if (_frameCount % 30 == 0) {
-                  print('DIAG-FPS: ${(1000 / ms).toStringAsFixed(1)} fps (${ms}ms interval) [frame $_frameCount]');
+                  diagLog('DIAG-FPS: ${(1000 / ms).toStringAsFixed(1)} fps (${ms}ms interval) [frame $_frameCount]');
                 }
               }
               _lastFrameTime = now;
@@ -1059,7 +1074,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                       const Duration(seconds: 2),
                       _onSafetyTimeout,
                     );
-                    print('DIAG-ANCHOR-FILTER: OFF (kick state=${_kickDetector.state.name}) — 2s safety timer armed');
+                    diagLog('DIAG-ANCHOR-FILTER: OFF (kick state=${_kickDetector.state.name}) — 2s safety timer armed');
                   } else if (!_anchorFilterActive &&
                              _safetyTimeoutTimer != null &&
                              _kickDetector.state == KickState.idle) {
@@ -1068,7 +1083,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                     _safetyTimeoutTimer = null;
                     _ballId.deactivateSessionLock();
                     _byteTracker.setProtectedTrackId(null);
-                    print('DIAG-ANCHOR-FILTER: ON (kick returned to idle — false-alarm recovery)');
+                    diagLog('DIAG-ANCHOR-FILTER: ON (kick returned to idle — false-alarm recovery)');
                   }
 
                   // 6. Trajectory prediction signals.
@@ -1113,7 +1128,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
                   // DIAG: Per-frame tracking during active tracking.
                   if (_impactDetector.phase == DetectionPhase.tracking) {
-                    print('DIAG-BYTETRACK: trackId=${ball?.trackId} '
+                    diagLog('DIAG-BYTETRACK: trackId=${ball?.trackId} '
                         'directZone=$directZone '
                         'bboxArea=${bboxArea?.toStringAsFixed(6)} '
                         'vel=(${velocity?.dx.toStringAsFixed(4)}, ${velocity?.dy.toStringAsFixed(4)}) '
@@ -1144,7 +1159,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                       _safetyTimeoutTimer = null;
                       if (_anchorRectNorm != null) {
                         _anchorFilterActive = true;
-                        print('DIAG-ANCHOR-FILTER: ON (decision fired — accepted)');
+                        diagLog('DIAG-ANCHOR-FILTER: ON (decision fired — accepted)');
                       }
 
                       // Log the impact decision.
@@ -1176,7 +1191,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                     } else {
                       // REJECT: not a real kick → discard silently.
                       final ts = DateTime.now().toIso8601String().substring(11, 23);
-                      print('AUDIO-DIAG: impact REJECTED by kick gate (kickState=${_kickDetector.state.name}) ($ts)');
+                      diagLog('DIAG-AUDIO: impact REJECTED by kick gate (kickState=${_kickDetector.state.name}) ($ts)');
                       _impactDetector.forceReset();
                       _wallPredictor?.reset();
                       _ballId.deactivateSessionLock();
@@ -1186,7 +1201,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                       _safetyTimeoutTimer = null;
                       if (_anchorRectNorm != null) {
                         _anchorFilterActive = true;
-                        print('DIAG-ANCHOR-FILTER: ON (decision fired — rejected)');
+                        diagLog('DIAG-ANCHOR-FILTER: ON (decision fired — rejected)');
                       }
                     }
                   }
@@ -1717,6 +1732,10 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _kickDetector.reset();
     _audioService.dispose();
     DiagnosticLogger.instance.stop();
+    // Close per-session on-device log file. Flushes any buffered lines and
+    // releases the file handle. Pairs with `DiagLogFile.instance.start()`
+    // in `initState`.
+    DiagLogFile.instance.stop();
 
     // Restore orientations for the rest of the app.
     SystemChrome.setPreferredOrientations([

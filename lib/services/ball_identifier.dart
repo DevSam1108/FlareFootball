@@ -4,6 +4,7 @@ import 'package:flutter/painting.dart' show Offset;
 
 import 'package:tensorflow_demo/models/tracked_position.dart';
 import 'package:tensorflow_demo/services/bytetrack_tracker.dart';
+import 'package:tensorflow_demo/utils/diag_log.dart';
 
 /// Identifies which [TrackedObject] from the ByteTrack tracker is the soccer
 /// ball and maintains trail history for the trail overlay.
@@ -87,13 +88,13 @@ class BallIdentifier {
   /// Activate session lock — stop re-acquiring to other trackIDs.
   void activateSessionLock() {
     _sessionLocked = true;
-    print('DIAG-BALLID: session lock ACTIVATED (trackId=$_currentBallTrackId)');
+    diagLog('DIAG-BALLID: session lock ACTIVATED (trackId=$_currentBallTrackId)');
   }
 
   /// Deactivate session lock — allow normal re-acquisition.
   void deactivateSessionLock() {
     _sessionLocked = false;
-    print('DIAG-BALLID: session lock DEACTIVATED');
+    diagLog('DIAG-BALLID: session lock DEACTIVATED');
   }
 
   /// Current ball velocity from the tracker's Kalman state.
@@ -149,7 +150,7 @@ class BallIdentifier {
           'static:${t.isStatic} '
           'state:${t.state.name} '
           'c:${t.confidence.toStringAsFixed(2)})').join(', ');
-      print('DIAG-BALLID: locked trackId=$_currentBallTrackId LOST. '
+      diagLog('DIAG-BALLID: locked trackId=$_currentBallTrackId LOST. '
           'Searching ${ballTracks.length} ball-class tracks: [$candidateInfo]');
       final movingTracks = ballTracks
           .where((t) =>
@@ -159,7 +160,7 @@ class BallIdentifier {
           .toList();
       if (movingTracks.length == 1) {
         ball = movingTracks.first;
-        print('DIAG-BALLID: re-acquired from trackId=$_currentBallTrackId → '
+        diagLog('DIAG-BALLID: re-acquired from trackId=$_currentBallTrackId → '
             'trackId=${ball.trackId} '
             'bbox=(${ball.bbox.width.toStringAsFixed(3)}x${ball.bbox.height.toStringAsFixed(3)}) '
             'ar:${(ball.bbox.height > 0 ? ball.bbox.width / ball.bbox.height : 0).toStringAsFixed(1)} '
@@ -168,13 +169,13 @@ class BallIdentifier {
             'reason=single_moving_track');
         _currentBallTrackId = ball.trackId;
       } else if (movingTracks.isEmpty) {
-        print('DIAG-BALLID: no moving tracks found (all static or lost)');
+        diagLog('DIAG-BALLID: no moving tracks found (all static or lost)');
       } else {
-        print('DIAG-BALLID: ${movingTracks.length} moving tracks — ambiguous, skipping re-acquisition');
+        diagLog('DIAG-BALLID: ${movingTracks.length} moving tracks — ambiguous, skipping re-acquisition');
       }
     } else if (ball == null && _currentBallTrackId != null && _sessionLocked) {
       // Session locked — do NOT re-acquire. Ride out the loss.
-      print('DIAG-BALLID: locked trackId=$_currentBallTrackId LOST but session lock ACTIVE — skipping re-acquisition');
+      diagLog('DIAG-BALLID: locked trackId=$_currentBallTrackId LOST but session lock ACTIVE — skipping re-acquisition');
     } else if (ball == null) {
       // No prior ball ID — first-time search
       final movingTracks = ballTracks
@@ -202,7 +203,7 @@ class BallIdentifier {
           return da.compareTo(db);
         });
         ball = candidates.first;
-        print('DIAG-BALLID: re-acquired from trackId=$_currentBallTrackId → '
+        diagLog('DIAG-BALLID: re-acquired from trackId=$_currentBallTrackId → '
             'trackId=${ball.trackId} '
             'bbox=(${ball.bbox.width.toStringAsFixed(3)}x${ball.bbox.height.toStringAsFixed(3)}) '
             'ar:${(ball.bbox.height > 0 ? ball.bbox.width / ball.bbox.height : 0).toStringAsFixed(1)} '

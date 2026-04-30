@@ -2,6 +2,8 @@ import 'dart:collection';
 import 'dart:math';
 import 'dart:ui' show Offset, Rect;
 
+import 'package:tensorflow_demo/utils/diag_log.dart';
+
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
@@ -878,7 +880,7 @@ class ByteTrackTracker {
       matchedTrackIdx.add(ti);
       matchedDetIdx.add(di);
 
-      print('DIAG-MATCH: Mahalanobis rescue trackId=${tracks[ti].id} '
+      diagLog('DIAG-MATCH: Mahalanobis rescue trackId=${tracks[ti].id} '
           'mahal²=${mahalSq.toStringAsFixed(4)} '
           'det=(${dets[di].bbox.center.dx.toStringAsFixed(3)}, '
           '${dets[di].bbox.center.dy.toStringAsFixed(3)})');

@@ -1,5 +1,6 @@
 import 'package:audioplayers/audioplayers.dart';
 import 'package:tensorflow_demo/models/impact_event.dart';
+import 'package:tensorflow_demo/utils/diag_log.dart';
 
 /// Singleton audio service for impact result feedback.
 ///
@@ -33,18 +34,18 @@ class AudioService {
     switch (event.result) {
       case ImpactResult.hit:
         if (event.zone != null) {
-          print('AUDIO-DIAG: impact result=hit zone=${event.zone} ($ts)');
+          diagLog('DIAG-AUDIO: impact result=hit zone=${event.zone} ($ts)');
           _player ??= AudioPlayer();
           await _player!.stop();
           await _player!.play(AssetSource('audio/zone_${event.zone}.m4a'));
         }
       case ImpactResult.miss:
-        print('AUDIO-DIAG: impact result=miss ($ts)');
+        diagLog('DIAG-AUDIO: impact result=miss ($ts)');
         _player ??= AudioPlayer();
         await _player!.stop();
         await _player!.play(AssetSource('audio/miss.m4a'));
       case ImpactResult.noResult:
-        print('AUDIO-DIAG: impact result=noResult — silent ($ts)');
+        diagLog('DIAG-AUDIO: impact result=noResult — silent ($ts)');
         break;
     }
   }
@@ -88,7 +89,7 @@ class AudioService {
   /// the cadence is firing on-device.
   Future<void> playBallInPosition() async {
     final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
-    print('AUDIO-DIAG: ball_in_position fired ($ts)');
+    diagLog('DIAG-AUDIO: ball_in_position fired ($ts)');
     _player ??= AudioPlayer();
     await _player!.stop();
     await _player!.play(AssetSource('audio/ball_in_position.m4a'));
@@ -102,7 +103,7 @@ class AudioService {
   /// 2026-04-29 — added alongside the multi-object cleanup nudge.
   Future<void> playMultipleObjects() async {
     final ts = DateTime.now().toIso8601String().substring(11, 23); // HH:MM:SS.mmm
-    print('AUDIO-DIAG: multiple_objects fired ($ts)');
+    diagLog('DIAG-AUDIO: multiple_objects fired ($ts)');
     _player ??= AudioPlayer();
     await _player!.stop();
     await _player!.play(AssetSource('audio/multiple_objects.m4a'));
