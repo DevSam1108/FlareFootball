@@ -2,6 +2,51 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## Diagnostic Logging Infrastructure Overhaul (2026-04-30)
+
+### Summary
+Investment session focused on analysis tooling rather than behavior fixes. Three coordinated changes shipped: (1) every single-line `DIAG-*` print routed through a new `diagLog()` wrapper at [lib/utils/diag_log.dart](../lib/utils/diag_log.dart) that prepends `[HH:MM:SS.mmm]` per line; (2) all three multi-line boxed blocks (CALIBRATION DIAGNOSTICS, PIPELINE START, IMPACT DECISION) now carry timestamps as first inner line — PIPELINE START gets one transitively via embedded calibration block; (3) on-device per-session `.log` text file written via Zone interceptor in [lib/main.dart](../lib/main.dart) feeding new `DiagLogFile` singleton at [lib/services/diag_log_file.dart](../lib/services/diag_log_file.dart). Files named `diag_<YYYY-MM-DD>_<HH-MM-SS>.log`, lifecycle bound to detection-screen `initState`/`dispose`, 500 ms flush cadence. iOS `Info.plist` enabled `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace` — Documents folder now visible in Finder (Mac, plugged in) and iOS Files app (on-device). Existing CSV `DiagnosticLogger` unplugged via single-line comment-out at [live_object_detection_screen.dart:834](../lib/screens/live_object_detection/live_object_detection_screen.dart:834); CSV-related code preserved as dead code per user's "let later refactor remove cleanly" stance. "Share Log CSV" button hides itself automatically (its `if (filePath != null)` guard fails). Field-verified end-to-end on iPhone 12.
+
+### Code changes applied this session
+- **New file: [lib/utils/diag_log.dart](../lib/utils/diag_log.dart)** — `diagLog(String msg)` wrapper. Prepends `[HH:MM:SS.mmm]` and calls `print()`. Single source of truth for the timestamp format used by all single-line diagnostic prints.
+- **New file: [lib/services/diag_log_file.dart](../lib/services/diag_log_file.dart)** — `DiagLogFile` singleton with in-memory buffer + 500 ms flush timer + `start()`/`stop()`/`append()` API. Files named `diag_<YYYY-MM-DD>_<HH-MM-SS>.log` in `getApplicationDocumentsDirectory()`. `_active` flag set true synchronously inside `start()` so `append` accepts lines immediately while async file open completes; first periodic flush after sink is ready drains the early buffer. Force-flush on `stop()` only (no app-pause / no after-decision flushes — accepted ~500 ms hard-crash data-loss window).
+- **[lib/main.dart](../lib/main.dart)** — `runApp()` wrapped in `runZonedGuarded()` with `ZoneSpecification.print` override forwarding to `parent.print()` (terminal) AND `DiagLogFile.instance.append(line)` (on-device file). Result: every `print()` in the app — DIAG-*, multi-line blocks, AUDIO-STUB, framework prints — gets captured in the file. True 1:1 replica of debug-mode terminal output.
+- **[lib/screens/live_object_detection/live_object_detection_screen.dart](../lib/screens/live_object_detection/live_object_detection_screen.dart):**
+  - Imported `DiagLogFile`. Added `DiagLogFile.instance.start()` in `initState` and `DiagLogFile.instance.stop()` in `dispose`.
+  - Single-line comment-out: `// DiagnosticLogger.instance.start();` at line 834 with multi-line rationale comment. Master-switch unplug — every other `DiagnosticLogger.instance.*` call site becomes a natural no-op.
+  - Renamed `AUDIO-DIAG` → `DIAG-AUDIO` (1 occurrence). Migrated 12 single-line DIAG-* prints to `diagLog()`.
+  - Added `final ts = DateTime.now().toIso8601String().substring(11, 23);` at top of `_logCalibrationDiagnostics()` and inserted `print('│ timestamp=$ts');` as first inner line of the CALIBRATION DIAGNOSTICS block.
+  - Removed PIPELINE START's `print('│ timestamp=${DateTime.now().toIso8601String()}');` line (now redundant given the calibration block's own timestamp).
+- **[lib/services/audio_service.dart](../lib/services/audio_service.dart)** — renamed `AUDIO-DIAG` → `DIAG-AUDIO` (5 occurrences) and migrated all to `diagLog()`. Imported `diag_log.dart`.
+- **[lib/services/ball_identifier.dart](../lib/services/ball_identifier.dart)** — migrated 7 `DIAG-BALLID` prints to `diagLog()`. Imported `diag_log.dart`.
+- **[lib/services/bytetrack_tracker.dart](../lib/services/bytetrack_tracker.dart)** — migrated 1 `DIAG-MATCH` print to `diagLog()`. Imported `diag_log.dart`.
+- **[lib/services/impact_detector.dart](../lib/services/impact_detector.dart)** — renamed `AUDIO-DIAG` → `DIAG-AUDIO` (1 comment reference). Migrated 3 `DIAG-IMPACT` prints to `diagLog()`. Imported `diag_log.dart`. Moved IMPACT DECISION block's header `($ts)` to first inner line: `print('┌─── IMPACT DECISION ───');` followed by `print('│ timestamp=$ts');`.
+- **[ios/Runner/Info.plist](../ios/Runner/Info.plist)** — added `<key>UIFileSharingEnabled</key><true/>` and `<key>LSSupportsOpeningDocumentsInPlace</key><true/>` adjacent to existing `LSRequiresIPhoneOS`.
+
+### Memory-bank updates this session
+- `CLAUDE.md` — Key File Map gains two new entries (`lib/utils/diag_log.dart`, `lib/services/diag_log_file.dart`); "Pending Code-Health Work" gains a new section for `DiagnosticLogger` full removal candidate; Path B validation rule updated stale `AUDIO-DIAG` reference to `DIAG-AUDIO`.
+- `memory-bank/decisionLog.md` — three new ADRs: ADR-088 (timestamp standardisation), ADR-089 (on-device `.log` file via Zone interceptor), ADR-090 (DiagnosticLogger unplugged as dead code).
+- `memory-bank/activeContext.md` — comprehensive Session 2026-04-30 record covering the 14 design decisions made during the discussion-led implementation.
+- `memory-bank/progress.md` — new Session 2026-04-30 section at top.
+
+### Verification
+- `flutter analyze` — 77 issues found, all info-level (avoid_print on intentional diagnostic prints + pre-existing test/style lints in `bytetrack_tracker.dart` and `test/`). **0 errors.** 1 pre-existing dead-code warning at `live_object_detection_screen.dart:1011` (the `if (false)` guard for ADR-087 multi-object nudge — unchanged from prior session).
+- `flutter test` — **177/177 passing** (unchanged from prior session — the diagnostic infrastructure is invisible to existing tests).
+- Field validation (iPhone 12, 2026-04-30):
+  - File created on Start Detection → closed on back-out → re-created on next Start Detection. ✅
+  - File visible on iPhone via Files app → On My iPhone → app folder. ✅
+  - File transferable to Mac via Finder + USB. Opens cleanly in any text editor. ✅
+  - All single-line `DIAG-*` lines prefixed with `[HH:MM:SS.mmm]`. ✅
+  - Multi-line blocks each carry one `│ timestamp=...` line as first inner line. ✅
+  - "Share Log CSV" button no longer renders in the detection screen UI. ✅
+
+### Open after this session
+- DiagnosticLogger full code removal — tracked in CLAUDE.md "Pending Code-Health Work" as a future focused refactor pass (delete the service file, remove all call sites, audit `share_plus` usage). Current state: dead but non-disruptive.
+- Android verification of all 2026-04-30 logging changes pending. Specifically: Android's `getApplicationDocumentsDirectory()` may not be browsable from Android Files apps without MediaStore wiring — flag for the Android verification round.
+- Carry-over bugs from session 2026-04-29 still open (ISSUE-035, ISSUE-036, ISSUE-037, ISSUE-038, audio kick-gate refractory acceptance) — designed but not applied. User prioritised analysis tooling first; behaviour fixes come next.
+
+---
+
 ## Phantom-Decision Suppression + Multi-Object Nudge + Architectural Findings (2026-04-29)
 
 ### Summary

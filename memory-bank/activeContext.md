@@ -3,9 +3,67 @@
 > **CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
 ## Current Focus
-**Piece A applied + accepted as net win for the common case (ADR-086, 2026-04-29). Multi-object cleanup nudge (ADR-087, 2026-04-29) added then disabled via `if (false)` guard pending separate diagnosis of suspected kick-drops. Two new architectural concerns surfaced in late-session analysis (ISSUE-037 foot-locked-as-ball cascade; ISSUE-038 ImpactDetector trigger gap — decisions only fire on lost-frame or edge-exit, never positively on impact). Path A (ADR-083/084/085) still in place; mechanism A field validation still owed. Audio cadence bug (ISSUE-036) and Piece A widening (ISSUE-035) and audio kick-gate widening (refractory acceptance) all designed but not yet applied — user accepted Piece A's known edge-case cost as worth shipping for now.**
+**Diagnostic logging infrastructure overhaul completed (2026-04-30). Three coordinated changes shipped to make field-test logs cross-referenceable with screen recordings and to make logs available in release-mode runs without a Mac connection.** (1) Single-line `DIAG-*` prints now route through a new `diagLog()` wrapper at [lib/utils/diag_log.dart](lib/utils/diag_log.dart) that prepends `[HH:MM:SS.mmm]` to every line. (2) Multi-line boxed blocks (CALIBRATION DIAGNOSTICS, IMPACT DECISION) now carry their own `│ timestamp=...` as the first inner line; PIPELINE START's redundant trailing timestamp removed since it transitively gets one from the embedded calibration block. (3) On-device per-session `.log` text file written via a Zone interceptor in [lib/main.dart](lib/main.dart) feeding a new `DiagLogFile` singleton at [lib/services/diag_log_file.dart](lib/services/diag_log_file.dart) — file lifecycle bound to `LiveObjectDetectionScreen.initState`/`dispose`, files named `diag_<YYYY-MM-DD>_<HH-MM-SS>.log` in the app's Documents directory, 500 ms flush cadence. iOS `Info.plist` enabled `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace` so the Documents folder is visible in Finder (plugged into Mac) and the iOS Files app (on-device). The previous `DiagnosticLogger` CSV system was unplugged via single-line `start()` comment-out — all related code preserved as dead code per user's "let later refactor remove cleanly" stance. Field-verified end-to-end on iPhone 12: file accessible on-device via Files app, transferable to Mac, opens cleanly in any text editor with full per-line timestamps and timestamped block headers. Outstanding bugs from prior session (ISSUE-035, ISSUE-036, ISSUE-037, ISSUE-038, audio kick-gate refractory acceptance) all unchanged — designed-but-not-applied; user prioritised the analysis tooling first.
 
-This session (2026-04-29) was extensive: applied Piece A and its dedicated tests, applied multi-object cleanup nudge then disabled it after field-test concerns, generated new audio asset via `say -o ... --data-format=aac`, formally closed bounce-back / player-head FP / ball-identifier false re-acquisition / ISSUE-030 stuck-lock entries against Phase 3 evidence, and surfaced two larger architectural findings (ISSUE-037, ISSUE-038) that frame future work.
+This session (2026-04-30) was an analysis-tooling investment, not a behavior fix. Codebase functional behavior is identical to end of session 2026-04-29; only the log surface changed (uniform `[HH:MM:SS.mmm]` prefix on every diagnostic line, plus on-device `.log` file output). Future field test sessions will use the new on-device `.log` files as the primary analysis artefact.
+
+### Session 2026-04-30 — diagnostic logging infrastructure
+
+This session was a discussion-led design then implementation in two phases. Decisions made in order; each item below resolved one user-facing question.
+
+**Decision 1 — uniform timestamp prefix on every diagnostic line.** User's pain point: terminal log lines have no per-line timestamps, making cross-referencing with screen recordings ("which kick fired this audio?") manual and error-prone. Decided to standardise: every single-line `DIAG-*` print routes through a new `diagLog(String msg)` helper that prepends `[HH:MM:SS.mmm]`. Multi-line boxed blocks carry one timestamp inside (first inner line) per block.
+
+**Decision 2 — `diagLog` over Dart's built-in `log`.** Renamed from `log()` to `diagLog()` to avoid colliding with `dart:math.log` and `dart:developer.log`, and to pair naturally with the `DIAG-*` prefix convention. Lives at [lib/utils/diag_log.dart](lib/utils/diag_log.dart). Internally calls `print()` so terminal output behaviour is identical to today.
+
+**Decision 3 — naming consistency before migration.** Renamed `AUDIO-DIAG` → `DIAG-AUDIO` (7 occurrences across 3 files) so all subsystem prefixes follow the `DIAG-<subsystem>` shape. Found via grep before migrating.
+
+**Decision 4 — leave inline `($ts)` suffixes alone.** Several existing prints already end with `($ts)`. Decision: don't strip them during migration ("not sure if they stay; revisit during a refactor"). Wrapper prefix coexists with inline suffix; cosmetic only.
+
+**Decision 5 — block timestamps as first inner line, format `HH:MM:SS.mmm`.** PIPELINE START today has a trailing `│ timestamp=2026-04-29T...` (full ISO). CALIBRATION DIAGNOSTICS standalone has none. IMPACT DECISION had `($ts)` on the header line. Standardised: `│ timestamp=HH:MM:SS.mmm` as the first line *inside* the block (right after the opener border). Reasons: (a) unambiguous ownership when blocks nest (PIPELINE START embeds CALIBRATION DIAGNOSTICS — the trailing-line approach made it look like the timestamp belonged to calibration when it actually belonged to the outer block); (b) matches IMPACT DECISION's existing position (just inside, not on header); (c) drops the date because filename already carries date and per-day cross-referencing is what matters.
+
+**Decision 6 — PIPELINE START gets timestamp transitively.** Since `_logCalibrationDiagnostics()` is always called inside PIPELINE START, the calibration timestamp covers both blocks (microseconds apart). PIPELINE START's own trailing `│ timestamp=...` line removed as redundant.
+
+**Decision 7 — on-device `.log` file via Zone interceptor.** User's pain: in release mode (no Mac connected, no `flutter run` debug bridge) terminal logs are invisible. Decided to install one Zone interceptor at app startup so every `print()` call in the app — including all diagnostic prints, the multi-line blocks, AUDIO-STUB, framework prints — gets forwarded to a per-session `.log` file. True 1:1 replica of debug-mode terminal output.
+
+**Decision 8 — file lifecycle = detection screen lifecycle.** "Session START" = user taps Start Detection on home screen (creates new file). "Session END" = user backs out to home screen (closes file). Re-calibration mid-session = same file. Multiple sessions per app launch = multiple separate timestamp-named files. Background/lock retains the current file (screen stays alive). Force-kill loses up to ~500 ms of buffer. Same-screen multi-session boundary aligned with how the user runs tests.
+
+**Decision 9 — 500 ms flush, dispose-only force-flush.** In-memory buffer flushed to disk every 500 ms. Force-flush on screen dispose only (not on app pause / not after IMPACT DECISION). User explicitly accepted the small data-loss window in exchange for simplicity.
+
+**Decision 10 — buffer + file logic in dedicated service file, interceptor wires it.** Singleton `DiagLogFile` at [lib/services/diag_log_file.dart](lib/services/diag_log_file.dart) holds the buffer + timer + file handle + start/stop/append API. Interceptor in `main.dart` is just a 5-line block calling `DiagLogFile.instance.append(line)`. Matches the project's existing singleton service pattern (`AudioService`, `NavigationService`).
+
+**Decision 11 — `LiveObjectDetectionScreen` start/stop, `start()` sets `_active=true` synchronously.** Starts collecting buffer immediately on screen entry, even while the async `getApplicationDocumentsDirectory()` + file open is still in flight. First periodic flush after sink is ready drains the early buffer.
+
+**Decision 12 — iOS Info.plist visibility flags.** Added `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace`. The reason CSV files were never visible to the user despite years of `DiagnosticLogger` writing them: neither flag was set. Now plugging the iPhone into Mac → Finder → device → Files tab shows the app's Documents folder; the iOS Files app on the phone itself also shows it under "On My iPhone".
+
+**Decision 13 — unplug DiagnosticLogger as dead code, don't remove yet.** User changed mid-implementation from "remove CSV logger entirely" to "unplug but keep code for later refactor cleanup." Single line commented out: `// DiagnosticLogger.instance.start();` at [live_object_detection_screen.dart:834](lib/screens/live_object_detection/live_object_detection_screen.dart:834). Without `start()`, all other CSV methods become natural no-ops (their `_active` flag stays false), the "Share Log CSV" button hides itself (its `if (filePath != null)` guard fails), and `share_plus`-based sharing is gone — but user verified iOS Files app + Finder paths cover their workflow. CLAUDE.md "Pending Code-Health Work" section now tracks the future cleanup as a single focused change.
+
+**Decision 14 — share button vanishes; user OK with it.** Side benefit user noted: less UI clutter on the detection screen. Retrieval is now exclusively via the iOS Files app or Finder. No new UI added.
+
+### Implementation summary
+
+**New files (2):**
+- [lib/utils/diag_log.dart](lib/utils/diag_log.dart) — `diagLog(String msg)` wrapper. ~15 lines.
+- [lib/services/diag_log_file.dart](lib/services/diag_log_file.dart) — `DiagLogFile` singleton: 500 ms flush timer, in-memory buffer, `start()` / `stop()` / `append()` / `isActive` / `filePath`. ~95 lines.
+
+**Modified files (4):**
+- [lib/main.dart](lib/main.dart) — wraps `runApp()` in `runZonedGuarded()` with `ZoneSpecification.print` override forwarding to both terminal (parent.print) and DiagLogFile.
+- [lib/screens/live_object_detection/live_object_detection_screen.dart](lib/screens/live_object_detection/live_object_detection_screen.dart) — added `DiagLogFile.instance.start()` in `initState`, `DiagLogFile.instance.stop()` in `dispose`; commented out `DiagnosticLogger.instance.start()` with rationale; renamed `AUDIO-DIAG` → `DIAG-AUDIO`, migrated 12 `DIAG-*` prints to `diagLog`; added `│ timestamp=...` to CALIBRATION DIAGNOSTICS as first inner line; removed PIPELINE START's redundant trailing `│ timestamp=...`.
+- [lib/services/audio_service.dart](lib/services/audio_service.dart) — renamed `AUDIO-DIAG` → `DIAG-AUDIO` and migrated 5 `DIAG-AUDIO` prints to `diagLog`.
+- [lib/services/ball_identifier.dart](lib/services/ball_identifier.dart) — migrated 7 `DIAG-BALLID` prints to `diagLog`.
+- [lib/services/bytetrack_tracker.dart](lib/services/bytetrack_tracker.dart) — migrated 1 `DIAG-MATCH` print to `diagLog`.
+- [lib/services/impact_detector.dart](lib/services/impact_detector.dart) — migrated 3 `DIAG-IMPACT` prints to `diagLog`; moved IMPACT DECISION block's `($ts)` from header to first inner line as `│ timestamp=...`; updated stale comment reference from `AUDIO-DIAG` to `DIAG-AUDIO`.
+- [ios/Runner/Info.plist](ios/Runner/Info.plist) — added `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace` keys (both `<true/>`).
+
+**Field validation (iPhone 12, 2026-04-30):**
+- Per-session `.log` file created on Start Detection, closed on back-out. Verified.
+- File visible on iPhone via Files app → On My iPhone → app folder. Verified.
+- File transferable to Mac via Finder + USB cable. Opens in plain text editor with full content. Verified.
+- "Share Log CSV" button no longer visible during a live session. Verified.
+- All single-line `DIAG-*` outputs prefixed with `[HH:MM:SS.mmm]`; all three multi-line blocks carry timestamps as first inner line; no duplicate timestamps anywhere. Verified.
+
+**Verification:**
+- `flutter analyze` — 77 issues found, all info-level (avoid_print on intentional diagnostic prints + pre-existing tests/style). 0 errors. 1 pre-existing dead-code warning ([live_object_detection_screen.dart:1011](lib/screens/live_object_detection/live_object_detection_screen.dart:1011), the `if (false)` guard for ADR-087 multi-object nudge — unchanged from prior session).
+- `flutter test` — **177/177 passing** (unchanged from prior session — no test changes; the diagnostic infrastructure is invisible to existing tests).
 
 ### Session 2026-04-29 — scenarios discussed, analyses, and proposed fixes
 
@@ -181,17 +239,16 @@ This is the consolidated record of every scenario walked through with the user t
 - **ImpactDetector enters `tracking` phase on idle-ball detection-noise jitter** — entry threshold `minVelocityMagnitudeSq = 0.000009` is sensitive enough to be crossed by sub-pixel detection wobble on a stationary ball. Under old code this caused phantom decisions during waiting (silently rejected by the result gate). Under Path A no decision fires (Change 2 disabled the relevant trigger), so it's wasted work + log noise rather than wrong audio. The user correctly observed this is a Phase 3 design intent gap — anchor filter goes to sleep on the input side during waiting (`_anchorFilterActive=true`), but ImpactDetector itself never received a parallel "sleep during waiting" gate. Folded into the Path B notes in `CLAUDE.md`.
 
 ## What Is Fully Working
-- YOLO11n live camera detection on iOS (iPhone 12). Android (Realme 9 Pro+) parity verified through 2026-04-16; Phase 1 / Phase 5 / Path A changes not yet re-verified on Android.
+- YOLO11n live camera detection on iOS (iPhone 12). Android (Realme 9 Pro+) parity verified through 2026-04-16; Phase 1 / Phase 5 / Path A / Session 2026-04-30 changes not yet re-verified on Android.
 - ByteTrack multi-object tracker with 8-state Kalman filter
 - BallIdentifier with 3-priority identification, session lock, and single-track `setReferenceTrack(TrackedObject)` API driven by player tap
 - Ball trail overlay with kick-state-based visibility (dots only during kicks)
 - "Ball lost" badge after 3 consecutive missed frames
 - 4-corner calibration with DLT homography transform
 - 9-zone target mapping via TargetZoneMapper
-- ImpactDetector (Phase 3 state machine) with directZone decision — **now correctly tracks zone progression through state-flip frames after Path A Change 1 + Option A extension (2026-04-28)**
+- ImpactDetector (Phase 3 state machine) with directZone decision — correctly tracks zone progression through state-flip frames after Path A Change 1 + Option A extension (2026-04-28)
 - KickDetector (4-state gate: idle/confirming/active/refractory)
 - Audio feedback for impact results (zone callouts + miss buzzer)
-- DiagnosticLogger CSV export with Share Log
 - Pre-ByteTrack AR > 1.8 filter (rejects torso/limb false positives)
 - Session lock prevents re-acquisition during active kicks
 - Protected track extends ByteTrack survival for locked ball
@@ -200,7 +257,12 @@ This is the consolidated record of every scenario walked through with the user t
 - Rotate-to-landscape overlay with accelerometer
 - Phase 1 tap-to-lock reference capture, Phase 2 magenta anchor rectangle, Phase 3 spatial filter (with idle-edge recovery + safety timeout + resting-ball trail dot), Phase 5 audio prompts (tap-prompt + "Ball in position", isStatic-gated)
 - Back button works in every screen state (calibration, awaiting reference capture, live pipeline)
-- **(NEW 2026-04-28) Decision-trace diagnostic harness** — `AUDIO-DIAG`, `DIAG-IMPACT [DETECTED]`/[MISSING ]`, timestamped IMPACT DECISION block. Lets us see audio-decision sync, distinguish trigger paths per frame, and validate any future ImpactDetector change empirically against pre/post log captures.
+- Decision-trace diagnostic harness — `DIAG-AUDIO` (renamed from `AUDIO-DIAG` 2026-04-30), `DIAG-IMPACT [DETECTED]`/[MISSING ]`, timestamped IMPACT DECISION block. Lets us see audio-decision sync, distinguish trigger paths per frame, and validate any future ImpactDetector change empirically against pre/post log captures.
+- **(NEW 2026-04-30) Diagnostic logging infrastructure overhaul** —
+  - Every single-line `DIAG-*` print prefixed with `[HH:MM:SS.mmm]` via `diagLog()` wrapper.
+  - All three multi-line blocks (CALIBRATION DIAGNOSTICS, PIPELINE START, IMPACT DECISION) carry timestamps as first inner line; PIPELINE START gets it transitively via embedded calibration block.
+  - Per-session on-device `.log` text file at `Documents/diag_<YYYY-MM-DD>_<HH-MM-SS>.log` — true 1:1 replica of `flutter run` debug terminal, available in release mode without Mac connection. Visible in iOS Files app on the phone and Finder when plugged into Mac.
+  - DiagnosticLogger CSV unplugged (preserved as dead code); "Share Log CSV" button no longer renders.
 
 ## What Is Partially Done / In Progress
 - **Piece A — kickState idle gate at `_makeDecision`** (applied 2026-04-29, ADR-086). Original idle-jitter scenario field-validated. Edge case: a real zone-6 kick was eaten in the same session (ISSUE-035) due to a race with KickDetector's internal transition + Phase 3 idle-edge recovery. **User decision (end of session): accept Piece A as-is for now** — net win for the common case (idle-jitter phantoms reliably suppressed); the edge case is rare enough that the trade is acceptable. Widening (`_kickConfirmedDuringTracking` flag) is designed and stays as future work.
@@ -223,8 +285,7 @@ This is the consolidated record of every scenario walked through with the user t
 - `tennis-ball` priority 2 in class filter (harmless diagnostic concession)
 - Free Apple Dev cert expires every 7 days — re-run `flutter run` to re-sign
 - Phantom impact decisions during kick=idle (log noise only, not announced) — partially mitigated by Path A Change 2 (no longer fires) but ImpactDetector still enters tracking phase wastefully
-- Share Log button is dev-only; not intended to ship to production
-- Mid-session Re-calibrate does NOT call `DiagnosticLogger.instance.stop()` (only `dispose` does), so Share Log button stays visible during a mid-session Re-calibrate → corner taps could land under it. Niche and dev-only; not fixing
+- DiagnosticLogger CSV system unplugged but still in codebase as dead code (single-line comment-out at [live_object_detection_screen.dart:834](lib/screens/live_object_detection/live_object_detection_screen.dart:834)); full removal tracked in CLAUDE.md "Pending Code-Health Work" — needs to clean up `lib/services/diagnostic_logger.dart`, all `DiagnosticLogger.instance.*` call sites, the "Share Log CSV" button block, and possibly the `share_plus` dependency if no longer needed elsewhere
 - 4 of 5 zone signals (`_lastWallPredictedZone`, `_bestExtrapolation`, `_lastDepthVerifiedZone`, plus `_velocityHistory` accumulator) computed every frame, never consulted at decision time — documented in CLAUDE.md Path B notes for future cleanup
 
 ## Model Files: Developer Machine Setup Required
@@ -247,18 +308,17 @@ flutter run
 ```
 
 ## Immediate Next Steps
-1. **User testing with multi-object disabled.** User wants to see if kick-drops persist with multi-object turned off. If kicks still drop, the multi-object code wasn't the cause; we look elsewhere (likely ISSUE-035 widening or ISSUE-038 trigger gap). If kicks stop dropping, we keep multi-object disabled or find a less-invasive design before re-enabling.
-2. **Apply audio kick-gate widening** to accept `refractory` (one-line edit at `live_object_detection_screen.dart:1133–1134`). Would close half of the eaten-kick scenarios (the FP-stuck-tracker cases where decision fires during refractory, observed in zone-6 and zone-8 field logs). Phase 3 already prevents the bounce-back risk that originally justified the narrow gate.
-3. **Apply audio cadence fix (ISSUE-036).** Delete the buggy `else` branch AND add `_lastBallInPositionAudio = null;` inside the filter OFF block at line ~1006. ~2 lines net. Designed but not applied.
-4. **Address ISSUE-037 — tighten BallIdentifier shape gate.** Reject `ar < 0.6 || ar > 1.5` during `nearest_non_static` re-acquisition. Closes the foot-locked-as-ball cascade observed in 2026-04-29 field log. Same root class as ISSUE-028 (player head, ar:0.9).
-5. **Address ISSUE-038 — add positive impact trigger to ImpactDetector.** Fire decision when `directZone != null && ball.isStatic && trackFrames > N` during tracking phase. Closes the late-firing + wrong-zone problem visible in slow grounded kicks and FP-stuck-tracker scenarios. This is the deepest architectural fix on the table.
-6. **Investigate KickDetector premature `confirming → idle` transition** (companion to ISSUE-035). Read `lib/services/kick_detector.dart` to identify the actual trigger.
-7. **Capture a real flat-kick log to validate Path A Change 2 (velocity-drop trigger disabled).**
-8. **Optional Piece A widening (ADR-086 follow-up)** — when prioritised, add `_kickConfirmedDuringTracking` boolean inside ImpactDetector to make the idle-gate honour historical kick-confirmation rather than instantaneous state. Closes ISSUE-035. A center-zone (4 or 5) shot where all frames stay [DETECTED] — `kick=confirming` → `kick=active`, no Mahalanobis rescue gaps. Expected trace: velRatio crosses below 0.4 mid-flight (around F5–F6) but trigger does NOT fire; ball continues to be tracked through real zones; decision eventually fires via lost-frame or edge-exit with the correct impact zone. Without this, mechanism A is only theoretically resolved.
-2. **Capture additional zone-variety kicks** — at least one each to zones 2/3 (right-side low) and 4/5/6 (middle row). Expected: `lastDirectZone` at decision time matches visually observed impact. This builds confidence that the fix generalizes beyond the one verified case (zone 7 from 1→6→7 trajectory).
-3. **Android (Realme 9 Pro+) parity verification** — run all phases (1/2/3/5) plus Path A end-to-end; specifically watch that `_toDetections` rotation correction interacts cleanly with the unchanged anchor filter, and that the new diagnostic prints fire at the same state transitions on Android as on iOS.
-4. **Plan Path B (deferred refactor) as a future phase** — see `CLAUDE.md` "Pending Code-Health Work" section. Either restructure the two-branch split into a single unconditional state-update path, or at minimum delete the dead signals (`_lastWallPredictedZone`, `_bestExtrapolation`, `_lastDepthVerifiedZone`, `_velocityHistory`) and the services that feed them (`wall_plane_predictor.dart`, `trajectory_extrapolator.dart`). Validation rule (capture pre/post traces with the existing diag harness) is locked in.
-5. **Optional Path A polish (non-blocking):** the ImpactDetector idle-tracking issue is wasted work but not currently producing wrong audio; bundle the fix with Path B rather than treating as a separate change.
+1. **Capture a fresh field-test log using the new on-device `.log` file infrastructure.** This is the first session where the new logging is the primary analysis surface. A few-kicks session will validate: per-line timestamps in normal flow; multi-line block timestamps for IMPACT DECISION; file lifecycle (start at Start Detection, close on back-out); cross-referencing flow against a screen recording. If anything looks off, fix before applying any of the deferred behavior fixes — the diagnostic surface is now load-bearing.
+2. **User testing with multi-object disabled.** User wants to see if kick-drops persist with ADR-087 multi-object turned off. If kicks still drop, the multi-object code wasn't the cause; we look elsewhere (likely ISSUE-035 widening or ISSUE-038 trigger gap). If kicks stop dropping, we keep multi-object disabled or find a less-invasive design before re-enabling.
+3. **Apply audio kick-gate widening** to accept `refractory` (one-line edit at `live_object_detection_screen.dart:1133–1134`). Would close half of the eaten-kick scenarios (the FP-stuck-tracker cases where decision fires during refractory, observed in zone-6 and zone-8 field logs). Phase 3 already prevents the bounce-back risk that originally justified the narrow gate.
+4. **Apply audio cadence fix (ISSUE-036).** Delete the buggy `else` branch AND add `_lastBallInPositionAudio = null;` inside the filter OFF block at line ~1006. ~2 lines net. Designed but not applied.
+5. **Address ISSUE-037 — tighten BallIdentifier shape gate.** Reject `ar < 0.6 || ar > 1.5` during `nearest_non_static` re-acquisition. Closes the foot-locked-as-ball cascade observed in 2026-04-29 field log. Same root class as ISSUE-028 (player head, ar:0.9).
+6. **Address ISSUE-038 — add positive impact trigger to ImpactDetector.** Fire decision when `directZone != null && ball.isStatic && trackFrames > N` during tracking phase. Closes the late-firing + wrong-zone problem visible in slow grounded kicks and FP-stuck-tracker scenarios. This is the deepest architectural fix on the table.
+7. **Investigate KickDetector premature `confirming → idle` transition** (companion to ISSUE-035). Read `lib/services/kick_detector.dart` to identify the actual trigger.
+8. **Capture a real flat-kick log to validate Path A Change 2 (velocity-drop trigger disabled).** Now easier to capture — release-mode test on iPhone, retrieve `.log` file via Files app, analyse offline.
+9. **Optional Piece A widening (ADR-086 follow-up)** — when prioritised, add `_kickConfirmedDuringTracking` boolean inside ImpactDetector to make the idle-gate honour historical kick-confirmation rather than instantaneous state. Closes ISSUE-035.
+10. **Android (Realme 9 Pro+) parity verification** — run all phases (1/2/3/5) plus Path A plus 2026-04-30 logging changes end-to-end. The on-device `.log` file route on Android needs equivalent visibility — Android typically uses `getExternalStorageDirectory()` for browsable Documents; need to verify whether the current `path_provider.getApplicationDocumentsDirectory()` location is reachable from Android Files apps without MediaStore wiring. Out of scope for this session but flagged for the Android verification round.
+11. **Plan Path B (deferred refactor) as a future phase** — see `CLAUDE.md` "Pending Code-Health Work" section. Either restructure the `_onBallDetected`/`_onBallMissing` two-branch split into a single unconditional state-update path, or at minimum delete the dead signals (`_lastWallPredictedZone`, `_bestExtrapolation`, `_lastDepthVerifiedZone`, `_velocityHistory`) and the services that feed them (`wall_plane_predictor.dart`, `trajectory_extrapolator.dart`). Bundle DiagnosticLogger CSV full removal into the same focused refactor pass.
 
 ### Prior context — Anchor Rectangle Phase 5 (2026-04-23 → 2026-04-24)
 Audio announcements shipped in four atomic commits, all iOS-verified on iPhone 12. Scope reduced from three prompts to two during design (the "Ball far, bring closer" nudge was deferred pending field evidence it's needed). Two flow-gap bugs surfaced and were fixed in the same session (ISSUE-032 / ADR-081 — State 3→2 nudge restart; ISSUE-033 / ADR-082 — `isStatic` gate on "Ball in position"). User tuned cadence to 10 s and shortened "Ball in position" phrase. Inline trigger via timestamp-in-loop pattern (ADR-080), no Timers added.

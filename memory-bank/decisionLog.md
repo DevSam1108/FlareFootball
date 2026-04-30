@@ -1613,5 +1613,107 @@
 
 ---
 
+### ADR-088: Diagnostic Log Timestamp Standardisation — `diagLog()` Wrapper + First-Inner-Line Block Timestamps
+
+- **Date:** 2026-04-30
+- **Context:** User pain point during field test analysis: terminal log lines have no per-line timestamps, making cross-referencing with screen recordings ("which kick fired this audio?") manual and error-prone. Additionally, multi-line boxed blocks (CALIBRATION DIAGNOSTICS, PIPELINE START, IMPACT DECISION) handled timestamps inconsistently — PIPELINE START had a trailing line in full ISO format, IMPACT DECISION had a header `($ts)` in HH:MM:SS.mmm, CALIBRATION DIAGNOSTICS had none. Naming was also slightly inconsistent — `AUDIO-DIAG` reversed prefix order vs all other `DIAG-*` subsystems.
+- **Options Considered:**
+  1. **Status quo + manual frame-counting** — keep the inconsistent-or-missing timestamps and rely on counting frame-tagged lines to align with screen recordings. Was the workflow to date.
+  2. **Per-call DateTime.now() at every print site** — change every `print('DIAG-...')` to inline-compute and prepend a timestamp. ~30 mechanical edits with copy-paste prone to drift over time.
+  3. **Wrapper function + uniform format** — introduce `diagLog(String msg)` at `lib/utils/diag_log.dart` that prepends `[HH:MM:SS.mmm]` and calls `print()`. Migrate all single-line `DIAG-*` prints to it. Multi-line blocks keep plain `print()` but each gets a `│ timestamp=...` as the first inner line.
+  4. **Use `dart:developer.log()`** — Dart's structured-logging facility supports timestamps natively. Rejected because `developer.log()` does NOT reliably go to stdout in `flutter run` terminal across platforms — would change observed terminal behaviour and break the user's debugging workflow.
+- **Decision:** Option 3 — wrapper function `diagLog()` for single-line prints + first-inner-line `│ timestamp=...` for multi-line blocks. Format `HH:MM:SS.mmm` (drop date — filename carries it; cross-referencing within a session is what matters). Naming-consistency pass: rename `AUDIO-DIAG` → `DIAG-AUDIO` (7 occurrences across 3 files) before migration so the prefix family is uniform.
+- **Rationale:**
+  - **Single chokepoint for format changes.** Changing the wrapper changes every diagnostic line at once. Per-call inline timestamps would require a code-wide edit on every future format tweak.
+  - **Multi-line blocks need their own timestamp because the wrapper can only see one print() at a time.** A block that spans 22 plain-print calls would either get 22 timestamps (noisy) or the wrapper format would only catch the opener. Cleanest: each block prints one `│ timestamp=...` line itself, treated as block metadata.
+  - **First-inner-line position is unambiguous when blocks nest.** PIPELINE START embeds CALIBRATION DIAGNOSTICS. When CALIBRATION's timestamp is the first inner line of CALIBRATION, ownership is clear. A trailing line on the outer block (the prior approach) creates visual ambiguity — looks like it belongs to the inner block.
+  - **PIPELINE START gets timestamp transitively.** Since `_logCalibrationDiagnostics()` is always called inside PIPELINE START's body and the prints fire microseconds apart, the calibration timestamp is functionally equivalent to a PIPELINE START timestamp. No need for a duplicate. PIPELINE START's old trailing `│ timestamp=...` line removed as redundant.
+  - **HH:MM:SS.mmm matches user workflow.** Screen recordings carry the device clock; the date is implicit from the recording session. Full ISO date adds noise to every line for negligible benefit.
+  - **Naming consistency pays compounding interest.** A grep for `DIAG-*` should find every diagnostic line. `AUDIO-DIAG` was a single outlier from the original convention; renaming is one-time cost for permanent grep ergonomics.
+- **Trade-offs Accepted:**
+  - **Wrapper introduces an extra stack frame per diagnostic print.** Negligible cost; `print()` is already slow relative to the function-call overhead.
+  - **Inline `($ts)` suffixes already present in some prints are preserved.** They become slightly redundant with the wrapper prefix, but stripping them was deferred per user's "leave them as is — not sure if they stay" stance.
+  - **Migration touches 5 source files.** Worthwhile one-time cost.
+  - **Dart's `dart:math.log` and `dart:developer.log` are name conflicts** with the natural `log()` choice. Renamed wrapper to `diagLog()` to avoid both.
+- **Implementation:**
+  - New file: `lib/utils/diag_log.dart` with `diagLog(String msg)` (~15 lines).
+  - 7 `AUDIO-DIAG` → `DIAG-AUDIO` renames across `audio_service.dart`, `live_object_detection_screen.dart`, `impact_detector.dart`.
+  - 28 single-line `DIAG-*` prints migrated to `diagLog()` across `audio_service.dart`, `ball_identifier.dart`, `bytetrack_tracker.dart`, `impact_detector.dart`, `live_object_detection_screen.dart`.
+  - CALIBRATION DIAGNOSTICS gains `│ timestamp=$ts` as first inner line in `_logCalibrationDiagnostics()`.
+  - PIPELINE START loses its trailing `│ timestamp=...` line.
+  - IMPACT DECISION moves `($ts)` from header to first inner line as `│ timestamp=$ts`.
+- **Verification:** `flutter analyze` clean (no new errors/warnings; pre-existing dead-code warning unchanged). `flutter test` 177/177 passing. Field-verified on iPhone 12 — every diagnostic line carries `[HH:MM:SS.mmm]`, every multi-line block carries one `│ timestamp=...` inner line, no duplicates anywhere.
+- **Status:** Accepted, implemented and field-verified 2026-04-30.
+
+---
+
+### ADR-089: On-Device Per-Session `.log` File via Zone Interceptor for Release-Mode Log Capture
+
+- **Date:** 2026-04-30
+- **Context:** User pain point: in release-mode runs (no Mac connection, no `flutter run` debug bridge), terminal logs are entirely invisible. The only way to retrieve log content was the existing `DiagnosticLogger` CSV system + `share_plus` button — which (a) only captured a subset of pipeline events in a structured CSV format (not a 1:1 replica of the terminal), (b) required the user to remember to tap Share at the end of the session, and (c) wrote files to a Documents directory that was invisible without `Info.plist` flags the project never set. User explicitly wanted "exact replica of what i currently see in logs during debug mode" available in release mode without per-session manual export.
+- **Options Considered:**
+  1. **Status quo + Mac connection for testing** — accept that log analysis requires `flutter run` from a connected Mac. Was the workflow until now.
+  2. **iOS OSLog via `dart:developer.log()`** — emits structured logs to Apple's `os_log` system, viewable in Console.app on Mac when iPhone is paired. Cross-platform asymmetry: Android logcat is similar but requires `adb` connection. Doesn't help when device is fully untethered.
+  3. **File-based logging at every print site** — modify `diagLog()` to also write to a file. Misses multi-line block prints (which use plain `print()`) and `AUDIO-STUB` (which uses plain `print()`).
+  4. **Zone interceptor wrapping `runApp()`** — install one `runZonedGuarded()` interceptor at app startup with a `ZoneSpecification.print` override. Every `print()` call in the app — DIAG-*, multi-line blocks, AUDIO-STUB, framework prints — gets forwarded to both terminal (parent.print) and a file. True 1:1 replica.
+- **Decision:** Option 4 — Zone interceptor in `main.dart` + `DiagLogFile` singleton service holding the buffer + file handle + lifecycle methods. File created on `LiveObjectDetectionScreen.initState()` and closed on `dispose()`. Auto-saved to device with no user action required.
+- **Rationale:**
+  - **Zone interceptor is the only mechanism in Dart that can capture every `print()` call.** Any other approach (per-call file writes, `dart:developer.log`) only captures the calls explicitly routed through it. Multi-line blocks, `AUDIO-STUB`, and framework prints would be missed.
+  - **Cross-platform symmetric.** Same code path captures logs identically on iOS and Android. OSLog/logcat approaches require platform-specific tooling.
+  - **Auto-save matches user's stated workflow.** "Save automatically, transfer to Mac later, don't want to mess with Share button during testing." File created on Start Detection, closed on back-out — no per-session export step.
+  - **Per-session file boundary aligns with how the user runs tests.** Each "Start Detection → kick a few times → back to home" cycle = one `.log` file. Re-calibration mid-session stays in same file. Multiple sessions per app launch produce separate timestamp-named files.
+  - **Buffered writes avoid per-print disk I/O.** During a kick, `DIAG-IMPACT [DETECTED]` fires every frame (~30 prints/sec). Writing to flash 30+ times/sec would cause stutter/battery drain. Buffering with a 500 ms flush timer means ~2 disk writes/sec carrying ~20 lines each — same data, way less I/O cost.
+  - **`runZonedGuarded` over `runZoned`** — captures uncaught errors as well, forwarding them through the same `print()` interceptor so they land in the on-device file. One-line cost; future debugging dividend.
+  - **`LiveObjectDetectionScreen` lifecycle is the right session boundary** because that screen is the only meaningful test surface. Home screen has no diagnostic content worth capturing. Background/lock retains the file (current screen-stays-alive behaviour); force-kill loses up to ~500 ms of buffered data — accepted.
+- **Trade-offs Accepted:**
+  - **Up to ~500 ms of unflushed buffer is lost on force-kill or hard crash.** User explicitly accepted this in exchange for simpler buffering logic. App-pause force-flush rejected to keep code minimal.
+  - **`_active = true` is set synchronously in `start()` so `append` accepts lines immediately while async file open completes.** First periodic flush after sink is ready drains the early buffer. Ensures no early-initState prints are silently dropped during the ~10-50 ms async file open window.
+  - **`Info.plist` visibility flags required.** `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace` added so the Documents folder is browsable in Finder (Mac) and iOS Files app. Both flags are additive; no security implication for a dev/test app.
+  - **Files accumulate on device.** No automatic cleanup; user manages via the iOS Files app or Finder. Acceptable for dev/test workflow; a production-quality version would add rotation logic.
+  - **Android Documents directory may not be browsable from Android Files apps** without MediaStore wiring. Will be flagged for the Android verification round; not blocking on iOS.
+- **Implementation:**
+  - New file: `lib/services/diag_log_file.dart` (~95 lines). Singleton with in-memory buffer, 500 ms `Timer.periodic` flush, `start()`/`stop()`/`append()` API. `_active` flag set synchronously inside `start()` so append works immediately.
+  - `lib/main.dart` — `runApp()` wrapped in `runZonedGuarded(...)` with `ZoneSpecification.print` override forwarding to both `parent.print()` and `DiagLogFile.instance.append(line)`.
+  - `lib/screens/live_object_detection/live_object_detection_screen.dart` — `DiagLogFile.instance.start()` in `initState`, `DiagLogFile.instance.stop()` in `dispose`.
+  - `ios/Runner/Info.plist` — added `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace` keys.
+  - File naming: `diag_<YYYY-MM-DD>_<HH-MM-SS>.log` in `getApplicationDocumentsDirectory()`.
+- **Verification:**
+  - `flutter analyze` clean (one new info-level `avoid_print` for the uncaught-error handler in main.dart, intentional).
+  - `flutter test` 177/177 passing (diagnostic infrastructure is invisible to existing tests).
+  - Field-verified end-to-end on iPhone 12: file created on Start Detection, closed on back-out, visible in iOS Files app on phone, transferable to Mac via Finder, opens cleanly in any text editor with full content.
+- **Status:** Accepted, implemented and field-verified 2026-04-30. Android verification pending.
+
+---
+
+### ADR-090: Unplug `DiagnosticLogger` CSV — Single-Line Disable, Preserve Code as Dead
+
+- **Date:** 2026-04-30
+- **Context:** With ADR-089's `.log` file now serving as the canonical session record (and serving more content than the CSV ever did — every print, not just structured frames/decisions), the `DiagnosticLogger` CSV system became redundant. User started the conversation wanting full removal but mid-session pivoted to "unplug it but keep the code as dead code, like other dead code we have." Reasoning: not removing avoids touching code paths that are still in working order; future cleanup can remove the entire system in one focused refactor when the project moves to a code-health phase.
+- **Options Considered:**
+  1. **Full removal** — delete `lib/services/diagnostic_logger.dart`, all `DiagnosticLogger.instance.*` call sites, the "Share Log CSV" button block, audit `share_plus` dep usage and remove if unused. ~30+ line edits across multiple files. Originally proposed.
+  2. **Single-line `start()` comment-out** — the master-switch approach. `DiagnosticLogger._active` only flips true inside `start()`. Without `start()`, every other method (`logFrame`, `logDecision`, `stop`, `filePath`) becomes a natural no-op (its early-return on `_active=false` fires). The "Share Log CSV" button is gated by `if (DiagnosticLogger.instance.filePath != null)` — without `start()`, `filePath` stays null, button hides itself.
+  3. **Replace CSV with `.log` in the existing share button** — repoint the share-CSV button at the new `.log` file. User declined; said the iOS Files app + Finder paths cover their workflow and removing one button from the UI is a side benefit.
+- **Decision:** Option 2 — single-line comment-out at `live_object_detection_screen.dart:834` with a multi-line rationale comment. CSV-related code preserved in place as dead code. Track full removal in CLAUDE.md "Pending Code-Health Work" as a future focused refactor.
+- **Rationale:**
+  - **Lowest-risk disable.** One literal line changes; no other lines touched. Compile-error risk is zero.
+  - **Master-switch pattern matches ADR-087's `if (false)` precedent.** Same project established the convention this session: disable behaviour, preserve code, comment with rationale, track future cleanup. ADR-087 used `if (false)` for a behavior block; ADR-090 uses comment-out for a constructor call. Both achieve the same property: code is dead but non-disruptive.
+  - **Avoids accidentally breaking working paths.** `share_plus` may be used by something else; deleting it would require an audit. Comment-out is safe even if it isn't.
+  - **CLAUDE.md tracks the full removal.** When the project enters a code-health refactor phase, the pending-work entry has the exact list of touchpoints to remove. No information loss.
+  - **"Share Log CSV" button vanishes for free.** Its `if (filePath != null)` guard fails; button doesn't render. User explicitly noted this as a side benefit ("less button on the screen UI").
+- **Trade-offs Accepted:**
+  - **Dead code lives in the codebase.** ~150 lines of `diagnostic_logger.dart` plus its call sites stay. Cost: nominal grep noise; zero runtime cost.
+  - **`share_plus` dependency stays.** Used only by code that's now dead. Will be re-evaluated in the future cleanup pass.
+  - **Mid-session re-calibrate doesn't need to call `DiagnosticLogger.instance.stop()` anymore** (it never did, only `dispose` did) — the gap that previously left the share button visible during re-calibrate is irrelevant now because the button itself doesn't render.
+- **Implementation:**
+  - `lib/screens/live_object_detection/live_object_detection_screen.dart` line 834: `// DiagnosticLogger.instance.start();` with a 7-line rationale comment block above it.
+  - `CLAUDE.md` "Pending Code-Health Work" — new section listing all touchpoints to delete: the service file, the call sites, the share button block, the `share_plus` dep audit.
+- **Verification:**
+  - `flutter analyze` clean (no new errors/warnings/infos beyond pre-existing).
+  - `flutter test` 177/177 passing.
+  - Field-verified on iPhone 12: no CSV file created on session start; "Share Log CSV" button no longer renders; `.log` file (from ADR-089) created and content captured normally.
+- **Status:** Accepted, implemented and field-verified 2026-04-30. Future full removal tracked in CLAUDE.md "Pending Code-Health Work".
+
+---
+
 *Decision log created: 2026-03-13*
 *Backfilled from: activeContext.md, progress.md, systemPatterns.md, techContext.md, productContext.md, issueLog.md, changelog.md, projectbrief.md, CLAUDE.md, .planning/research/*, .planning/ROADMAP.md, .planning/REQUIREMENTS.md*
