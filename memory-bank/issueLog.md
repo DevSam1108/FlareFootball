@@ -4,6 +4,84 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 ---
 
+## ISSUE-038: ImpactDetector Trigger Gap — Decisions Only Fire on Ball-Lost or Ball-At-Edge, Never Positively at Impact
+
+**Date:** 2026-04-29 (architectural finding from late-session analysis)
+**Platform:** N/A — design-level issue affecting all platforms
+**Symptom:** In scenarios where the ball is detected continuously through impact + bounce-back + rolling (no missed frames), the impact decision either fires very late or with the wrong zone announced. Two field logs from 2026-04-29 demonstrate concrete cases:
+- **Zone-6 kick (ISSUE-035 log)** — KickDetector dropped to idle one frame too early; lost-frame trigger eventually fired with kickState=idle → suppressed by Piece A.
+- **Zone-8 kick (FP-stuck-tracker log)** — target-fabric circles fed fake `[DETECTED]` frames for ~50 frames after the real ball was gone; lost-frame trigger fired ~1.6 s late, kickState=refractory by then, audio gate rejected.
+
+**Root Cause:** `ImpactDetector._makeDecision()` is called from only TWO paths today (after Path A disabled the velocity-drop trigger in ADR-083):
+1. **Lost-frame trigger** in `_onBallMissing` — fires when `_lostFrameCount >= 5`.
+2. **Edge-exit** — checked INSIDE `_makeDecision` after another trigger has already fired.
+
+`maxTrackingDuration` (3 s) calls `_reset()` instead of `_makeDecision()`, so it doesn't actually fire a decision — it silently abandons the tracking session.
+
+There is **no positive trigger** for "the ball reached its target and came to rest." All current triggers are negative (something must STOP — ball lost, ball off-screen). If the ball stays in `[DETECTED]` state continuously, the system has no way to decide.
+
+**Why physics usually saves the system:**
+- High-velocity kicks: ball is at smallest in-frame size near impact + motion blur → YOLO misses ~1–3 frames → if 5 align, lost-frame fires at impact.
+- Ball flies past wall: leaves frame → guaranteed missed frames.
+
+**Where the gap matters (where physics doesn't save):**
+- Slow grounded kicks (no motion blur, ball stays detected, rolls back on ground).
+- FP-stuck-tracker scenarios (target-fabric circles, cones, banner artefacts feed fake `[DETECTED]` frames after real ball is gone).
+- Very high-quality detection / good lighting / large ball.
+
+**Wrong-zone consequence:** When the lost-frame trigger eventually fires, `_lastDirectZone` is whatever zone the ball was last seen in. Path A (ADR-084) keeps `_lastDirectZone` fresh through `[MISSING]` frames, so during bounce-back, as the ball traverses zones 8 → 7 → 4 → 1 on its way down, `_lastDirectZone` overwrites with each new zone. By the time the trigger fires, the value is whatever the ball was last in before exiting the grid — typically a bottom-row zone (1, 2, or 3), not the impact zone (which was 8 at the actual physics moment).
+
+**Proposed fix (NOT applied):** Add a **positive trigger** to `ImpactDetector` in `_onBallDetected`:
+```
+if (directZone != null && ball.isStatic && trackFrames > minStaticFrames) {
+  _makeDecision();
+}
+```
+- Fires at the actual impact moment, when the ball has come to rest in a grid zone.
+- `_lastDirectZone` at that moment is still the impact zone (no bounce-back overwrite yet).
+- Decision lands while KickDetector is still in `confirming/active` — gate accepts, audio plays, zone highlights.
+- Tunable: `minStaticFrames` should be ~3–5 frames (~100–170 ms at 30 fps) — long enough to confirm staticness, short enough to fire before bounce-back.
+
+**Status:** 🟠 OPEN — architectural fix designed, not applied. User has not yet asked for implementation. Discussion only.
+
+**Related:**
+- ADR-083 (velocity-drop trigger disabled — was originally the positive trigger for impact, now needs replacement).
+- ADR-085 (Path B refactor deferred — could naturally include the positive trigger).
+- ISSUE-035 (Piece A eats real kicks — symptom of the same trigger gap, where decision lands too late).
+- ISSUE-037 (foot-locked-as-ball cascade — same trigger gap creates 60-frame stuck states).
+
+---
+
+## ISSUE-037: Foot/Non-Ball Object Locked as Ball Triggers Full False-Kick Cascade
+
+**Date:** 2026-04-29
+**Platform:** iOS (iPhone 12) — field test
+**Symptom:** Player walked toward the kick area without kicking. App falsely detected a "kick", got stuck in tracking phase for 60+ frames, fired `ball_in_position` audio for what was actually a foot/shoe, ran the safety-timeout cascade, and ended in dual-class detection (`Soccer ball` + `tennis-ball` at same coordinates). Full log shows BallIdentifier re-acquired `trackId=9` with `bbox=(0.049×0.068)` and `ar:0.7` at (0.472, 0.752) via `reason=nearest_non_static`. The "ball" then moved horizontally x=0.402 → 0.328 over ~12 frames, growing in bbox area (0.0021 → 0.0034) — geometrically a leg/foot stepping toward the camera. KickDetector confirmed and went `active`. ImpactDetector entered tracking. `directZone=null` for all 75 frames (object never entered grid).
+
+**Root Cause:** Three compounding issues:
+
+1. **BallIdentifier's `nearest_non_static` re-acquisition has no shape filter for elongated-vertical objects.** Existing AR filter only rejects `AR > 1.8` (torso). Objects with `AR < 0.6` (foot, shoe) and `AR ≈ 0.9` (player head — see ISSUE-028) pass through. The "nearest_non_static" criterion combined with no shape gate means whatever is moving and closest to the previous lock position becomes the new lock — foot/leg motion qualifies trivially.
+
+2. **Once locked, KickDetector trips on the foot's horizontal motion.** No shape check downstream. Foot's lateral velocity easily crosses the jerk threshold and sustains energy long enough to reach `active`.
+
+3. **ImpactDetector cannot escape its tracking phase** because `directZone=null` (foot/leg is below the grid in image coordinates, near y=0.72), edge-exit can't fire (object centered, far from edges), and `[DETECTED]` keeps refreshing as the foot is continuously visible. Trapped for 60 frames until `maxActiveFrames` safety-net pushes KickDetector to refractory. (Same as ISSUE-038's symptom.)
+
+**Cone confounder (separate but related):** User confirmed a physical cone sits at the kick spot. Field log shows it being dual-classed: `[Soccer ball@(0.331,0.723) size=(0.047x0.059) conf=0.99, tennis-ball@(0.331,0.723) size=(0.048x0.058) conf=0.80]`. The cone is the **terminal state** of the cascade (visible at the end), not the trigger (cones don't walk). It contributes during waiting state but didn't cause the cascade itself — the foot did.
+
+**Recommended actions discussed (none applied):**
+1. **Tighten BallIdentifier shape gate** — reject `ar < 0.6 || ar > 1.5` during `nearest_non_static` re-acquisition. Closes both foot/shoe (ar:0.7) and torso (ar:2.4+). Player head (ar:0.9) still escapes — same root issue as ISSUE-028.
+2. **Physically remove the cone** from inside the rect during testing — eliminates one decoy class.
+3. **Multi-object cleanup nudge** (ADR-087) — addresses the cone but not the foot. Currently disabled via `if (false)` after user concern about kick-drops.
+
+**Status:** 🟠 OPEN. NOT FIXED. Tighten-the-shape-gate fix is the highest-priority lever; closes the largest class of false locks.
+
+**Related:**
+- ISSUE-028 (player head ar:0.9 same root) — REVERTED prior attempt because init-delay broke re-acquisition. Lesson: any new filter must pass ALL tracks through to BallIdentifier; can tag/score but must not remove from candidate pool.
+- ISSUE-038 (ImpactDetector trigger gap) — explains why a false lock causes a 60-frame stuck state instead of self-resolving quickly.
+- ADR-087 (multi-object nudge added then disabled) — partial mitigation for the cone aspect.
+
+---
+
 ## ISSUE-036: "Ball in Position" Audio Fires Twice Within Seconds (10 s Cadence Broken by Single-Frame YOLO Misses)
 
 **Date:** 2026-04-29

@@ -2,6 +2,62 @@
 
 > **⚠️ CRITICAL: NEVER run `git commit`, `git push`, `git init`, or any git write commands. This project has NO git repository. It is local-only by explicit developer decision. This rule is ABSOLUTE and has been violated in the past — do NOT repeat.**
 
+## Phantom-Decision Suppression + Multi-Object Nudge + Architectural Findings (2026-04-29)
+
+### Summary
+Long extended-analysis session. Started with diagnosing pure stationary-ball jitter producing phantom IMPACT DECISION blocks during idle. Applied **Piece A** (kickState idle-gate at `_makeDecision` in `impact_detector.dart`) — field-validated for the original idle-jitter scenario, then immediately found to eat real kicks in a race-condition edge case (ISSUE-035). User accepted Piece A as net win for the common case; widening deferred. Added **multi-object cleanup audio nudge** (ADR-087) when user observed a physical cone at the kick spot being dual-classed by YOLO; disabled via single-line `if (false)` guard later in the session after user suspected it of dropping kicks in field test. Two new field logs surfaced larger architectural findings: **ISSUE-037** (foot/non-ball locked as ball cascade — same root class as ISSUE-028 player head) and **ISSUE-038** (ImpactDetector trigger gap — only fires negatively, decisions land late and with wrong zone after bounce-back overwrites `_lastDirectZone`). Several open-issue table entries in `CLAUDE.md` formally closed against Phase 3 mitigations (bounce-back FP, player-head FP during waiting, ball-identifier false re-acquisition during idle, ISSUE-030 stuck-lock).
+
+### Code changes applied this session
+- **Piece A — `lib/services/impact_detector.dart`** (ADR-086):
+  - Added `import 'package:tensorflow_demo/services/kick_detector.dart' show KickState;`
+  - New member `_currentKickState` (defaults to `KickState.confirming` for backward-compat with existing tests).
+  - New optional parameter `kickState` on `processFrame` — captured into `_currentKickState` at top of method.
+  - Gate at top of `_makeDecision`: `if (_currentKickState == KickState.idle) { print('DIAG-IMPACT [PHANTOM SUPPRESSED] ...'); _reset(); return; }`
+- **Piece A — `lib/screens/live_object_detection/live_object_detection_screen.dart`**:
+  - `processFrame` call site (line ~1061) now passes `kickState: _kickDetector.state`.
+- **Piece A — `test/impact_detector_test.dart`**:
+  - Added `import` for `KickState`.
+  - New test "phantom decision suppressed when kickState=idle" — drives the exact idle-jitter scenario from the field log; asserts phase resets to ready, no result emitted.
+  - New test "decision still fires when kickState=confirming (gate is permissive)" — same shape with confirming; asserts decision fires normally.
+- **Multi-object nudge — `lib/services/audio_service.dart`** (ADR-087):
+  - Added `playMultipleObjects()` method, mirroring `playBallInPosition()` exactly; prints `AUDIO-DIAG: multiple_objects fired`.
+- **Multi-object nudge — `lib/screens/live_object_detection/live_object_detection_screen.dart`**:
+  - Added `_lastMultipleObjectsAudio` field next to `_lastBallInPositionAudio`.
+  - Replaced lines 958–972 with a priority-gated combined audio block (priority 1: multi-object check; priority 2: byte-identical existing ball-in-position incl. ISSUE-036 buggy `else`).
+  - Added timestamp resets at re-calibration (line ~437) and dispose (line ~1675).
+- **Multi-object nudge — `assets/audio/multiple_objects.m4a`**:
+  - Generated via `say -o multiple_objects.m4a --data-format=aac "Multiple objects detected. Keep only the soccer ball."` (~46 KB AAC-LC, matches existing `ball_in_position.m4a` format).
+- **Multi-object nudge — DISABLED later same session**:
+  - Single-line edit: priority-1 condition `if (_anchorFilterActive && _anchorRectNorm != null && detections.length > 1)` replaced with `if (false /* ... */)` and original condition preserved as inline comment.
+  - Field, method, audio file, and reset lines all stay as harmless dead code. Else branch (byte-identical original ball-in-position) always runs.
+
+### Memory-bank updates this session
+- `CLAUDE.md` issue table — 4 stale rows updated to Phase 3-mitigated status (bounce-back FP, player-head FP during waiting, ball-identifier false re-acquisition, ISSUE-030 stuck-lock); 5 new rows added (ISSUE-035, ISSUE-036, ISSUE-037, ISSUE-038, audio kick-gate too narrow, ADR-087 disabled status).
+- `memory-bank/issueLog.md` — ISSUE-021 (bounce-back FP) flipped to ✅ FIXED BY PHASE 3 with full code-trace explanation; ISSUE-030 (stuck-lock) flipped to 🟢 MITIGATED BY PHASE 3 + Path A; new entries ISSUE-035, ISSUE-036, ISSUE-037, ISSUE-038.
+- `memory-bank/decisionLog.md` — new ADR-086 (Piece A — kickState idle gate) and ADR-087 (multi-object cleanup nudge added then disabled).
+- `memory-bank/activeContext.md` — comprehensive scenario log (Scenarios 1–9) covering every analysis discussed this session, with evidence/analysis/proposed-fix/status for each. Updated Current Focus, What Is Partially Done, Immediate Next Steps.
+- `memory-bank/progress.md` — new Session 2026-04-29 section at top with applied code, designed-not-applied fixes, investigations owed.
+
+### Verification
+- `flutter analyze` — 102 issues found, all info-level (avoid_print on intentional diagnostic prints + pre-existing prefer_const / unnecessary_import in tests). No errors, no warnings.
+- `flutter test` — **177/177 passing** (was 175 before Piece A; +2 new gate tests added with ADR-086).
+- Field validation:
+  - Piece A original case (idle-jitter phantom) — ✅ FIELD-VALIDATED on iPhone 12; produces `DIAG-IMPACT [PHANTOM SUPPRESSED]` line replacing the entire IMPACT DECISION block + AUDIO-DIAG REJECTED line.
+  - Piece A real-kick case — ❌ FIELD-FAILED (ISSUE-035) on a zone-6 kick; race condition between KickDetector internal transition + Phase 3 idle-edge recovery + Piece A's instantaneous-state gate.
+  - Multi-object nudge — disabled before any field validation could complete; user testing pending.
+
+### Open after this session
+- ISSUE-035 (Piece A widening): designed, deferred per user decision.
+- ISSUE-036 (audio cadence double-fire): designed, NOT applied.
+- ISSUE-037 (foot-locked-as-ball): discussed, NOT applied.
+- ISSUE-038 (ImpactDetector trigger gap): architectural finding, NOT applied.
+- Audio kick-gate widening (accept refractory): one-line fix designed, NOT applied.
+- KickDetector premature `confirming → idle` transition: investigation owed.
+- Path A mechanism A field validation: still owed (separate from this session's work).
+- Multi-object nudge re-enable decision: pending user field-test confirmation that kick-drops are unaffected.
+
+---
+
 ## ImpactDetector Accuracy Fix — Path A (2026-04-27 → 2026-04-28)
 
 ### Summary

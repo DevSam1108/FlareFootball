@@ -1572,6 +1572,45 @@
 - **Post-implementation issue:** Piece A's gate is too narrow. The "real kick happened" property is **historical** (a kick reached confirming/active at *some* point during the current tracking session), not instantaneous. Reading instantaneous state means flickers eat decisions. **Widening designed (NOT applied):** add boolean `_kickConfirmedDuringTracking`, set when `kickState != KickState.idle` is observed, clear in `_reset()`, gate becomes "suppress IF kickState IS idle now AND was idle the entire tracking session." This will be ADR-087 once applied.
 - **Status:** Applied 2026-04-29. Original phantom case ✅ field-validated. Real-kick case ❌ field-failed (ISSUE-035). Widening designed but not yet applied. Considering whether to revert Piece A first or apply the widening as a follow-up. **Subject to revision — see ISSUE-035 for the eating-real-kicks bug.**
 
+### ADR-087: Multi-Object Cleanup Audio Nudge — Added Then Disabled Same Session
+- **Date:** 2026-04-29
+- **Context:** Field log analysis (the foot-tracked-as-ball cascade — ISSUE-037) revealed that a physical cone at the kick spot is being dual-classed by YOLO as both `Soccer ball` and `tennis-ball` at near-identical coordinates. User wanted a UX-level cleanup prompt: when 2+ detections are inside the rect during waiting state, ask the player to keep only the soccer ball. Several design iterations were discussed before settling on the final shape, then the feature was disabled mid-session after user suspected it was dropping kicks during field testing.
+- **Decision (combined two-part):**
+  1. **Add a priority-gated combined audio block** in `live_object_detection_screen.dart` replacing the prior standalone ball-in-position block. Priority 1: multi-object check (`detections.length > 1` while filter ON). Priority 2: byte-identical existing ball-in-position logic, including its ISSUE-036 buggy `else` deliberately preserved (separate fix, separate ADR).
+  2. **After applying, disable via single-line `if (false)` guard** when user reported suspected kick-drops in field test. Original condition preserved as inline comment for easy re-enable. Field, method, audio file, and resets all stay as harmless dead code while disabled.
+- **Rationale (for the priority-gated structure, original design):**
+  - **Mutually exclusive on any single frame.** When 2+ objects are in the rect, "ball in position" is misleading because the player can't safely kick (BallIdentifier might have locked onto the wrong object). Cleanup prompt should fire first; ball-in-position only after spot is clean.
+  - **Byte-identical preservation of ball-in-position.** The else branch of the priority gate contains exactly the original ball-in-position logic. When count ≤ 1, behaviour is unchanged — same cadence, same buggy `else` (ISSUE-036 preserved deliberately so this change wasn't bundled with that fix).
+  - **Implicit ISSUE-036 fix would have been an over-reach.** Restructuring the audio block was the right scope for the multi-object feature; bundling in a cadence-bug fix would have violated `feedback_no_refactor_bundling.md`.
+  - **Reuses existing canonical signals.** `detections.length` (already computed by `_toDetections`), `_anchorFilterActive` (existing waiting-state indicator), 10 s cadence (matches ball-in-position). No new state-machine or new threshold.
+- **Rationale (for the disable):**
+  - **User instinct trumps mechanical analysis.** Mechanically, the multi-object check only fires while `_anchorFilterActive == true`, which is OFF during the entire kick. The check cannot logically affect kick detection. But the user observed the field-test correlation and asked to disable.
+  - **Single-line disable is safer than full revert.** Replacing the priority-1 condition with `if (false)` is one literal change, no field/method removal, no compile-error risk. The else branch (byte-identical original ball-in-position) always runs.
+  - **Easy to re-enable.** Original condition preserved as inline comment — flip one line back.
+- **Alternatives Considered:**
+  - **Two parallel if-blocks** (multi-object + ball-in-position both run independently). Rejected because both could fire on the same frame in ambiguous cases; user explicitly preferred priority gating.
+  - **Spatial-distinctness check** (only fire multi-object if 2+ detections are far enough apart to be physically distinct, vs. dual-class same object). Rejected — user pushed back on overengineering. The trade is correct: tell user to clear extras whether it's 2 distinct objects or 1 dual-classed object; the action is the same.
+  - **Don't add the feature at all.** Rejected because the cone/dual-class problem is real and a UX nudge is the simplest fix without risky algorithmic disambiguation.
+  - **Restore old block via full revert** (delete field, method, resets, audio file). Rejected when disabling — user explicitly asked for "comment out, don't delete" because of trust concerns about full reverts.
+- **Trade-offs Accepted:**
+  - **Dead code lives in the codebase.** Field, method, audio file, and reset lines all stay despite being unreachable while disabled. Low cost; cleaning up later.
+  - **ISSUE-036 cadence bug stays preserved.** Even with the priority-gated restructure, the buggy `else` in priority 2 is byte-identical to the original. Will be fixed in its own change (separate ADR when applied).
+  - **No diagnostic visibility while disabled.** With `if (false)`, the multi-object branch never runs, so no logs about how often `passed > 1` would have fired. If we want to gather data first, we could replace `if (false)` with `if (...condition... && false)` and add a print before the false-gate. Not done — user is testing without it for now.
+- **Implementation:**
+  - `lib/services/audio_service.dart` — added `playMultipleObjects()` (mirrors `playBallInPosition()` exactly, with `print('AUDIO-DIAG: multiple_objects fired ($ts)')` for visibility).
+  - `lib/screens/live_object_detection/live_object_detection_screen.dart`:
+    - Added `_lastMultipleObjectsAudio` field (next to `_lastBallInPositionAudio`).
+    - Replaced lines 958–972 with the priority-gated combined block.
+    - Added timestamp resets at re-calibration and dispose.
+    - **Disabled** by replacing priority-1 condition with `if (false /* original condition preserved as comment */)` immediately after field-test concern.
+  - `assets/audio/multiple_objects.m4a` — generated via `say -o multiple_objects.m4a --data-format=aac "Multiple objects detected. Keep only the soccer ball."` (~46 KB AAC-LC, matches existing format).
+- **Verification:**
+  - 177/177 tests pass post-add.
+  - 177/177 tests still pass post-disable.
+  - `flutter analyze` clean (only existing avoid_print info lines).
+  - Field validation pending.
+- **Status:** Applied 2026-04-29 (combined block in place). Disabled same session via `if (false)` guard pending user testing to confirm whether kick-drops persist with multi-object disabled. To re-enable: restore the original condition in the inline comment. Reviewed: 2026-04-29.
+
 ---
 
 *Decision log created: 2026-03-13*
