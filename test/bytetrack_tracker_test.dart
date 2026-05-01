@@ -80,6 +80,39 @@ void main() {
       final tracks = tracker.update([_det(0.5, 0.5, w: 0.06, h: 0.04)]);
       expect(tracks.first.bboxArea, closeTo(0.06 * 0.04, 0.001));
     });
+
+    test('sizeVelocity is zero on first detection', () {
+      final tracker = ByteTrackTracker();
+      final tracks = tracker.update([_det(0.5, 0.5, w: 0.04, h: 0.04)]);
+      expect(tracks.first.sizeVelocity.dx, 0.0);
+      expect(tracks.first.sizeVelocity.dy, 0.0);
+    });
+
+    test('sizeVelocity components positive when bbox grows over time', () {
+      final tracker = ByteTrackTracker();
+      late TrackedObject last;
+      // Bbox grows by 0.002 per frame in both dimensions (ball approaching).
+      for (var i = 0; i < 15; i++) {
+        final size = 0.04 + i * 0.002;
+        final tracks = tracker.update([_det(0.5, 0.5, w: size, h: size)]);
+        last = tracks.first;
+      }
+      expect(last.sizeVelocity.dx, greaterThan(0.0));
+      expect(last.sizeVelocity.dy, greaterThan(0.0));
+    });
+
+    test('sizeVelocity components negative when bbox shrinks over time', () {
+      final tracker = ByteTrackTracker();
+      late TrackedObject last;
+      // Bbox shrinks by 0.002 per frame in both dimensions (ball receding).
+      for (var i = 0; i < 15; i++) {
+        final size = 0.08 - i * 0.002;
+        final tracks = tracker.update([_det(0.5, 0.5, w: size, h: size)]);
+        last = tracks.first;
+      }
+      expect(last.sizeVelocity.dx, lessThan(0.0));
+      expect(last.sizeVelocity.dy, lessThan(0.0));
+    });
   });
 
   group('ByteTrackTracker - track lifecycle', () {
