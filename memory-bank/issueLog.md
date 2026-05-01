@@ -4,10 +4,10 @@ Recurring issues, root causes, and verified solutions. Check here before researc
 
 ---
 
-## ISSUE-038: ImpactDetector Trigger Gap — Decisions Only Fire on Ball-Lost or Ball-At-Edge, Never Positively at Impact
+## ISSUE-038: ImpactDetector Trigger Gap — Decisions Only Fire on Ball-Lost or Ball-At-Edge, Never Positively at Impact (CLOSED — NOT A REAL BUG)
 
-**Date:** 2026-04-29 (architectural finding from late-session analysis)
-**Platform:** N/A — design-level issue affecting all platforms
+**Date:** 2026-04-29 (logged as architectural finding); 2026-05-01 (closed as not a real bug after field log review).
+**Platform:** N/A — design-level concern, never a field-observed bug
 **Symptom:** In scenarios where the ball is detected continuously through impact + bounce-back + rolling (no missed frames), the impact decision either fires very late or with the wrong zone announced. Two field logs from 2026-04-29 demonstrate concrete cases:
 - **Zone-6 kick (ISSUE-035 log)** — KickDetector dropped to idle one frame too early; lost-frame trigger eventually fired with kickState=idle → suppressed by Piece A.
 - **Zone-8 kick (FP-stuck-tracker log)** — target-fabric circles fed fake `[DETECTED]` frames for ~50 frames after the real ball was gone; lost-frame trigger fired ~1.6 s late, kickState=refractory by then, audio gate rejected.
@@ -42,13 +42,25 @@ if (directZone != null && ball.isStatic && trackFrames > minStaticFrames) {
 - Decision lands while KickDetector is still in `confirming/active` — gate accepts, audio plays, zone highlights.
 - Tunable: `minStaticFrames` should be ~3–5 frames (~100–170 ms at 30 fps) — long enough to confirm staticness, short enough to fire before bounce-back.
 
-**Status:** 🟠 OPEN — architectural fix designed, not applied. User has not yet asked for implementation. Discussion only.
+**Closing rationale (2026-05-01):** Field log review (2026-05-01 sizeVelocity Phase 1 test on iPhone 12) showed the lost-frame trigger fires reliably at impact with the correct `lastDirectZone`. The "continuously DETECTED through impact" scenario is a thought experiment — never observed in field tests. The two cited concrete cases collapse on closer inspection:
+
+1. **Zone-6 kick / Piece A interaction (ISSUE-035)** — that's a Piece A timing race, not a trigger-gap issue. A positive impact trigger wouldn't change the outcome because Piece A would still gate on `kickState=idle` at the firing frame. The right fix lives in Piece A's gate logic (or KickDetector's transition timing), not in adding a new trigger.
+
+2. **Zone-8 FP-stuck-tracker** — that's a `BallIdentifier` mis-lock onto target-fabric circles / a foot (ISSUE-037). A positive impact trigger would still fire on the foot's `isStatic + directZone` — same wrong outcome via a different path. The real fix is the shape gate in ISSUE-037 to stop locking onto non-ball objects in the first place.
+
+3. **Slow grounded kicks** — covered by `maxTrackingDuration` (3 s) safety net or eventually by the ball going static + leaving frame.
+
+In short: the negative-trigger pipeline (lost-frame, edge-exit, maxTrackingDuration) covers all the failure modes actually observed in field tests post-Path-A. Adding a positive trigger introduces threshold-tuning work and new failure modes (e.g., firing too early on a ball that briefly stops mid-flight) without solving any real bug.
+
+**Phase 1 sizeVelocity exposure (kept):** the four-line `Offset get sizeVelocity` exposure on `_Kalman8` + `TrackedObject` + `_STrack.toPublic()` shipped 2026-05-01 stays in place. Originally scoped as preparation for an ISSUE-038 positive trigger, it has independent value as a diagnostic signal (visible in `DIAG-BYTETRACK` log), and could later support bounce-back detection or "ball returning to anchor" gating if either need arises. Phase 2 (consume the signal in pipeline logic) is **cancelled** — no consumer needed.
+
+**Status:** ✅ CLOSED — not a real bug. No fix to apply. Phase 2 work cancelled.
 
 **Related:**
-- ADR-083 (velocity-drop trigger disabled — was originally the positive trigger for impact, now needs replacement).
-- ADR-085 (Path B refactor deferred — could naturally include the positive trigger).
-- ISSUE-035 (Piece A eats real kicks — symptom of the same trigger gap, where decision lands too late).
-- ISSUE-037 (foot-locked-as-ball cascade — same trigger gap creates 60-frame stuck states).
+- ADR-083 (velocity-drop trigger disabled — was a buggy positive trigger; its removal stays correct, no replacement needed).
+- ADR-085 (Path B refactor deferred — independent of this issue; remains a code-health item, not a correctness fix).
+- ISSUE-035 (Piece A eats real kicks — separate root cause: timing race with KickDetector, not trigger gap).
+- ISSUE-037 (foot-locked-as-ball cascade — separate root cause: BallIdentifier shape gate missing, not trigger gap).
 
 ---
 
