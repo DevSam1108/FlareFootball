@@ -30,6 +30,13 @@ class TrackedObject {
   final Rect bbox;
   final Offset center;
   final Offset velocity;
+  /// Kalman-smoothed rate of change of bbox dimensions per frame:
+  /// `dx` = width-velocity (vw), `dy` = height-velocity (vh).
+  /// Positive components = bbox growing (object approaching the camera).
+  /// Negative components = bbox shrinking (object receding).
+  /// Phase 1 exposure (2026-05-01): not yet consumed by any pipeline stage —
+  /// surfaced for diagnostic logging and future positive-impact-trigger work.
+  final Offset sizeVelocity;
   final double bboxArea;
   final bool isStatic;
   final TrackState state;
@@ -43,6 +50,7 @@ class TrackedObject {
     required this.bbox,
     required this.center,
     required this.velocity,
+    required this.sizeVelocity,
     required this.bboxArea,
     required this.isStatic,
     required this.state,
@@ -220,6 +228,10 @@ class _Kalman8 {
 
   Offset get center => Offset(_x[0], _x[1]);
   Offset get velocity => Offset(_x[4], _x[5]);
+  /// Rate of change of bbox dimensions: vw (state 6) and vh (state 7).
+  /// Already computed by the constant-velocity model on every predict() —
+  /// this getter just surfaces the values that were already in [_x].
+  Offset get sizeVelocity => Offset(_x[6], _x[7]);
   double get width => _x[2];
   double get height => _x[3];
 
@@ -499,6 +511,7 @@ class _STrack {
         bbox: kalman.predictedBbox,
         center: kalman.center,
         velocity: kalman.velocity,
+        sizeVelocity: kalman.sizeVelocity,
         bboxArea: kalman.width.abs() * kalman.height.abs(),
         isStatic: isStatic,
         state: state,

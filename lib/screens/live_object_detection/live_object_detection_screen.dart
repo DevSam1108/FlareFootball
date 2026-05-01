@@ -1132,6 +1132,8 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                         'directZone=$directZone '
                         'bboxArea=${bboxArea?.toStringAsFixed(6)} '
                         'vel=(${velocity?.dx.toStringAsFixed(4)}, ${velocity?.dy.toStringAsFixed(4)}) '
+                        'sizeVel=(${ball?.sizeVelocity.dx.toStringAsFixed(5)}, ${ball?.sizeVelocity.dy.toStringAsFixed(5)}) '
+                        'sizeVelMag=${ball?.sizeVelocity.distance.toStringAsFixed(5)} '
                         'kick=${_kickDetector.state.name} '
                         'raw=(${rawPosition?.dx.toStringAsFixed(3)}, '
                         '${rawPosition?.dy.toStringAsFixed(3)}) '
