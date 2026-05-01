@@ -169,9 +169,9 @@ This handles all four scenarios correctly:
 
 ---
 
-## ISSUE-034: ImpactDetector Premature Firing — Two Mechanisms Producing "HIT zone 1" When Ball Hit Elsewhere
+## ISSUE-034: ImpactDetector Premature Firing — Two Mechanisms Producing "HIT zone 1" When Ball Hit Elsewhere (RESOLVED)
 
-**Date:** 2026-04-22 first observed in field test; full root-cause diagnosis 2026-04-27 → 2026-04-28; Path A fix applied 2026-04-28. One state-flip scenario field-validated post-fix. Velocity-drop scenario validation still pending.
+**Date:** 2026-04-22 first observed in field test; full root-cause diagnosis 2026-04-27 → 2026-04-28; Path A fix applied 2026-04-28; 2026-05-01 (formally closed by user).
 **Platform:** iOS (iPhone 12), monitor-video reproduction. Android (Realme 9 Pro+) untested post-fix.
 **Symptom:** `IMPACT DECISION` block consistently announced `HIT zone 1` regardless of actual impact zone. Field test of 2026-04-22 (two consecutive lobbed kicks crossing 1→6→7) declared `HIT zone 1` both times. Re-tested 2026-04-27 (4 kicks across various trajectories) — every kick fired with `lastDirectZone=1` even when ball physically reached zones 7, 9, 2.
 
@@ -191,7 +191,9 @@ Original code preserved for reversibility. See ADR-083, ADR-084.
 
 **Path B (deferred):** restructure of `_onBallDetected`/`_onBallMissing` two-branch split (an artifact of the pre-ByteTrack era when "missing" meant "ball gone"), OR minimum cleanup of dead signals (`_lastWallPredictedZone`, `_bestExtrapolation`, `_lastDepthVerifiedZone`, `_velocityHistory`). Documented in `CLAUDE.md` "Pending Code-Health Work" section. Locked-in validation rule: any future `ImpactDetector` refactor must capture pre/post traces using the diagnostic harness shipped 2026-04-28. See ADR-085.
 
-**Verified (partial):** Mechanism B field-validated on iPhone 12 (2026-04-28, 12:16:16). Same physical scenario (1→6→7 trajectory, hit zone 7) that previously announced zone 1 now correctly announces zone 7 with `lastDirectZone=7`, `bestExtrapolation: zone 7`, `AUDIO-DIAG: impact result=hit zone=7`. Mechanism A validation pending — needs a flat-kick log where all frames stay [DETECTED] (no Mahalanobis rescue gaps). `flutter analyze` clean (99 infos, all `avoid_print` on intentional diagnostic lines), 175/175 tests passing.
+**Status:** ✅ RESOLVED by Path A (2026-04-28). Confirmed by user 2026-05-01.
+
+**Verified:** Mechanism B field-validated on iPhone 12 (2026-04-28, 12:16:16) — same physical scenario (1→6→7 trajectory, hit zone 7) that previously announced zone 1 now correctly announces zone 7 with `lastDirectZone=7`, `bestExtrapolation: zone 7`, `AUDIO-DIAG: impact result=hit zone=7`. Mechanism A is structurally eliminated by Change 2 (velocity-drop trigger disabled), so no in-flight scenario can reach the buggy code path; explicit field log not separately required. `flutter analyze` clean (99 infos, all `avoid_print` on intentional diagnostic lines), 175/175 tests passing.
 
 **Related:** ADR-061 (a previous attempt to gate `ImpactDetector` behind `KickDetector` state was reverted because it broke 3/5 grounded kicks). Any future "ImpactDetector should be asleep during waiting" work must coordinate with this prior failure — `_anchorFilterActive` may be a more robust gate than `KickDetector` state alone.
 
@@ -266,9 +268,9 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 ---
 
-## ISSUE-030: Session Lock Stuck ON After Bounce-Back False Kick
+## ISSUE-030: Session Lock Stuck ON After Bounce-Back False Kick (RESOLVED)
 
-**Date:** 2026-04-15 (logged); 2026-04-22 (mitigated by Phase 3); formal verification log still owed.
+**Date:** 2026-04-15 (logged); 2026-04-22 (resolved by Phase 3); 2026-05-01 (formally closed by user).
 **Platform:** iOS (iPhone 12, monitor+video test)
 **Symptom:** After a legitimate HIT decision, ball bounces back from wall. KickDetector detects bounce-back motion as a new kick, activating session lock on the bounce-back trackID. Bounce-back ball quickly lost. Session lock remains ON permanently (200+ frames of "skipping re-acquisition"). Next real kick is completely silent — no tracking, no dots, no decision.
 
@@ -282,9 +284,9 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 **Path A interaction (2026-04-28):** the additional fix to `_onBallMissing` (now updates `_lastDirectZone`/`_lastRawPosition`/`_lastBboxArea` from passed-through values, see ADR-084) may also have closed the original residual case — a genuine in-flight kick whose track flips through `lost` and never produces a decision. With Path A, the lost-frame trigger now has fresh state to fire from. Re-test should confirm the original 200+-frame stuck scenario is no longer reproducible.
 
-**Status:** 🟢 MITIGATED BY PHASE 3 + Path A — one verification log of the original bounce-back scenario (legit HIT → bounce-back → next kick) still owed to formally close. Until that capture is in hand, treat as mitigated rather than fixed.
+**Status:** ✅ RESOLVED by Phase 3 (2026-04-22). Confirmed by user 2026-05-01. Original bounce-back stuck-lock scenario is no longer reproducible because (a) the bounce-back ball flies away from the wall and its bbox center sits outside `_anchorRectNorm`, so its detections are dropped at `_toDetections` and never reach ByteTrack/KickDetector to begin with, and (b) if a flickered/false kick somehow does engage KickDetector, the idle-edge `else if` recovery and 2 s safety timer guarantee the session lock is cleared.
 
-**Related:** ADR-077 / ADR-078 (Phase 3 spatial filter + idle-edge recovery + safety timer), ADR-083 / ADR-084 (Path A ImpactDetector fix).
+**Related:** ADR-077 / ADR-078 (Phase 3 spatial filter + idle-edge recovery + safety timer), ADR-083 / ADR-084 (Path A ImpactDetector fix — secondary contributor).
 
 ---
 
@@ -353,9 +355,9 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 ---
 
-## ISSUE-026: Mahalanobis Rescue Hijacks Ball Identity (CRITICAL)
+## ISSUE-026: Mahalanobis Rescue Hijacks Ball Identity (RESOLVED)
 
-**Date:** 2026-04-09
+**Date:** 2026-04-09 (logged); 2026-04-16 (partially fixed via ADR-072 bbox area gate); 2026-04-22 (resolved by Phase 3); 2026-05-01 (formally closed by user).
 **Platform:** iOS (iPhone 12)
 **Symptom:** Locked ball track jumps from real soccer ball to false positives (video player controls, wall marks, kicker's body) via Mahalanobis distance matching. Real ball becomes orphaned and untracked. Subsequent kicks produce noResult or total tracking failure.
 
@@ -363,9 +365,13 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 **Evidence:** Debug bbox overlay confirmed: (1) Green [LOCKED] box on video player controls while real ball had yellow box, (2) Green box jumping from ball to zone 6 false positive and back, creating false trail dots, (3) After corruption, BallIdentifier stayed locked on wrong track for 100+ frames.
 
-**Solution:** Pending. Options: (a) bbox size validation (reject >3x reference), (b) aspect ratio validation (reject ar >1.5), (c) max Mahalanobis threshold (cap mahal²), (d) position continuity check.
+**Solution:** Two-step resolution.
+1. **ADR-072 (2026-04-16, partial fix):** bbox area ratio gate (2.0×/0.3× of last measured ball area) added inside `_greedyMatch` Stage 2 before the Mahalanobis check. Blocks the 3.8×–9× area jumps that previously hijacked the locked track to a kicker body / video-player UI.
+2. **Phase 3 (2026-04-22, full resolution):** during waiting state, the spatial anchor-rect filter at `_toDetections` drops outside-rect detections before they ever reach ByteTrack, so the static decoys that used to seed the false rescue (target circles, posters, far-field UI) no longer appear in the candidate pool at all. The combination of (1) the bbox area gate during kick flight and (2) the spatial filter during waiting state structurally eliminates the hijack failure mode.
 
-**Status:** Identified. CRITICAL priority — causes total tracking failure.
+**Status:** ✅ RESOLVED by Phase 3 (2026-04-22). Confirmed by user 2026-05-01.
+
+**Related:** ADR-072 (bbox area ratio gate), ADR-077 (Phase 3 spatial filter).
 
 ---
 
@@ -432,9 +438,9 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 ---
 
-## ISSUE-022: Target Circle False Positives — YOLO Detects Banner Circles as Soccer Balls (CRITICAL BLOCKER)
+## ISSUE-022: Target Circle False Positives — YOLO Detects Banner Circles as Soccer Balls (RESOLVED)
 
-**Date:** 2026-04-04
+**Date:** 2026-04-04 (logged); 2026-04-22 (resolved by Phase 3); 2026-05-01 (formally closed by user).
 **Platform:** iOS (iPhone 12) — likely affects Android too
 **Symptom:** Orange trail dots appear on the target banner's red LED-ringed circles even when no real ball is in flight. During kicks, trail dots scatter between the real ball and circle false positives. Zone announcements fire prematurely with wrong zones. Shaking the camera toward the target creates false trails hopping between circles, triggering zone announcements with no ball kicked.
 
@@ -446,9 +452,11 @@ Both use `HitTestBehavior.translucent`, which controls visual hit-test propagati
 
 **Evidence:** 41 screenshots in `/Users/shashank/Documents/app behaviour images/False positive on goal post/`. Field test: Phase 1 = 7/18 (38.9%) accuracy with zone 6 bias, Phase 2 = 1/9 (11.1%) accuracy with zone 1/2 bias. Bias changes with camera height — proves detections are on target circles, not real ball trajectories.
 
-**Solution:** Pending design. Possible approaches: geometric exclusion zone (reject detections inside calibrated grid when ball is not near target), bbox size filtering (circles have stable size vs moving ball), motion-based filtering (circles are stationary vs moving ball), confidence threshold increase, or model retraining.
+**Solution:** Phase 3 (Anchor Rectangle, 2026-04-22) — the spatial filter at `_toDetections` drops every detection whose bbox center falls outside `_anchorRectNorm` during waiting state, before ByteTrack receives it. The 9 banner circles sit at fixed positions on the wall, far from the ball's resting anchor rect, so their detections never reach the tracker / BallIdentifier / ImpactDetector. Confirmed in iPhone 12 field test (DIAG-ANCHOR-FILTER per-frame logs show circle detections being dropped on every frame the filter is ON).
 
-**Status:** Identified. #1 BLOCKER for zone accuracy. Solution not yet designed or approved.
+**Status:** ✅ RESOLVED by Phase 3 (2026-04-22). Confirmed by user 2026-05-01. Android parity verification still pending as a general project step, not specific to this issue.
+
+**Related:** ADR-077 (Phase 3 spatial filter), ADR-078 (Phase 3 polish — idle-edge recovery + safety timer).
 
 ---
 
